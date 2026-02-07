@@ -99,3 +99,12 @@ class Scenario:
     network: TransportNetwork
     brands: List[Brand]
     bread_unit_cost: float  # cost (матожидание цены)
+
+    @property
+    def all_locations(self) -> List[Location]:
+        # Важно: порядок здесь должен соответствовать индексам в матрицах network
+        return self.warehouses + self.stores
+
+    @property
+    def location_ids(self) -> List[int]:
+        return [loc.id for loc in self.all_locations]
