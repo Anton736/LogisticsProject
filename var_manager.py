@@ -1,10 +1,13 @@
 from ortools.sat.python import cp_model
 from typing import Dict, Tuple, List, Optional
+
+from RouterPruner import RoutePruner
 from entities import Scenario, Store, Warehouse
 
 
 class VarManager:
-    def __init__(self, model: cp_model.CpModel, scenario: Scenario):
+    def __init__(self, model: cp_model.CpModel, scenario: Scenario, pruner: RoutePruner):
+        self.pruner = pruner
         self.model = model
         self.scenario = scenario
 
@@ -33,42 +36,51 @@ class VarManager:
         self._init_all_vars()
 
     def _init_all_vars(self):
+        """
+        Инициализация переменных с использованием фильтрации маршрутов (RoutePruner).
+        """
+        # 1. Получаем список разрешенных пар (i, j) от Прунера
+        # Это исключает создание лишних x_kij переменных
+        allowed_pairs = self.pruner.get_allowed_pairs()
         loc_ids = self.scenario.location_ids
+
         for v in self.scenario.vehicles:
-            # Машины и параметры смен
+            # Параметры использования ТС (w_I, k_is'', k_it'')
             self.vehicle_used[v.id] = self.model.NewBoolVar(f'used_v{v.id}')
-            self.total_dist[v.id] = self.model.NewIntVar(0, 500_000, f'dist_v{v.id}')
+            self.total_dist[v.id] = self.model.NewIntVar(0, 1_000_000, f'dist_v{v.id}')
             self.total_time[v.id] = self.model.NewIntVar(0, 1440, f'total_t_v{v.id}')
             self.shift_start[v.id] = self.model.NewIntVar(0, 1440, f'start_v{v.id}')
             self.shift_end[v.id] = self.model.NewIntVar(0, 1440, f'end_v{v.id}')
 
             for loc in self.scenario.all_locations:
-                # Временные метки и загрузка машины
+                # Временные метки (m_it'k) и загрузка машины (k_iq)
                 self.arrival_times[(v.id, loc.id)] = self.model.NewIntVar(0, 1440, f'arr_v{v.id}_l{loc.id}')
                 self.load_at_point[(v.id, loc.id)] = self.model.NewIntVar(0, v.capacity, f'load_v{v.id}_l{loc.id}')
 
-                # Детализация по брендам
+                # Детализация привоза/увоза по брендам (m_lt'vk0Wb, m_lt'vk1Wb)
                 for b in self.scenario.brands:
-                    self.delivered_vol[(v.id, loc.id, b.id)] = self.model.NewIntVar(0, v.capacity,
-                                                                                    f'del_v{v.id}_l{loc.id}_b{b.id}')
-                    self.pickup_vol[(v.id, loc.id, b.id)] = self.model.NewIntVar(0, v.capacity,
-                                                                                 f'pick_v{v.id}_l{loc.id}_b{b.id}')
+                    self.delivered_vol[(v.id, loc.id, b.id)] = self.model.NewIntVar(
+                        0, v.capacity, f'del_v{v.id}_l{loc.id}_b{b.id}'
+                    )
+                    self.pickup_vol[(v.id, loc.id, b.id)] = self.model.NewIntVar(
+                        0, v.capacity, f'pick_v{v.id}_l{loc.id}_b{b.id}'
+                    )
 
-                # Маршрутные бинарные переменные
-                for j_id in loc_ids:
-                    if loc.id != j_id:
-                        self.x[(v.id, loc.id, j_id)] = self.model.NewBoolVar(f'x_v{v.id}_{loc.id}_{j_id}')
+            # Создаем переменные движения x_kij только для разрешенных пар
+            for i_id, j_id in allowed_pairs:
+                self.x[(v.id, i_id, j_id)] = self.model.NewBoolVar(f'x_v{v.id}_{i_id}_{j_id}')
 
-        # Параметры складов
+        # Параметры складов/РЦ (w_I, w_iv, w_it'b)
         for wh in self.scenario.warehouses:
             self.wh_active[wh.id] = self.model.NewBoolVar(f'wh_active_{wh.id}')
-            self.wh_max_vol[wh.id] = self.model.NewIntVar(0, 1_000_000, f'wh_max_v{wh.id}')
+            self.wh_max_vol[wh.id] = self.model.NewIntVar(0, 2_000_000, f'wh_max_v{wh.id}')
 
             for b in self.scenario.brands:
                 for v in self.scenario.vehicles:
-                    # Динамический остаток (w_it'b)
-                    self.wh_stock_brand[(wh.id, b.id, v.id)] = self.model.NewIntVar(0, 1_000_000,
-                                                                                    f'stock_w{wh.id}_b{b.id}_v{v.id}')
+                    # Динамический остаток бренда на складе
+                    self.wh_stock_brand[(wh.id, b.id, v.id)] = self.model.NewIntVar(
+                        0, 2_000_000, f'stock_w{wh.id}_b{b.id}_v{v.id}'
+                    )
 
     # --- Геттеры для СЛОЯ 3 ---
 
