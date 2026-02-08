@@ -1,6 +1,6 @@
 from ortools.sat.python import cp_model
-from typing import Dict, Tuple, List
-from entities import Scenario, Vehicle, Location
+from typing import Dict, Tuple, List, Optional
+from entities import Scenario, Store, Warehouse
 
 
 class VarManager:
@@ -8,82 +8,78 @@ class VarManager:
         self.model = model
         self.scenario = scenario
 
-        # Реестры переменных
-        self.x = {}  # Маршруты: (k, i, j) -> BoolVar
-        self.arrival_times = {}  # Время прибытия: (k, i) -> IntVar
-        self.load_at_point = {}  # Загрузка ТС при выезде: (k, i) -> IntVar
-        self.delivered_vol = {}  # Выгрузка: (k, store_id, brand_id) -> IntVar
-        self.wh_active = {}  # Индикатор склада: wh_id -> BoolVar
-        self.wh_max_vol = {}  # Пиковый объем склада: wh_id -> IntVar
+        # --- РЕЕСТРЫ ПЕРЕМЕННЫХ ---
+        self.x = {}  # x_kij (движение: машина k из i в j)
+        self.arrival_times = {}  # m_jt'k (время прибытия машины k в точку j)
+        self.load_at_point = {}  # k_iq (загрузка ТС в ящиках при выезде из точки i)
 
-        # Технические переменные для целевой функции
-        self.vehicle_used = {}  # Использована ли машина k -> BoolVar
-        self.total_dist = {}  # Общий путь машины k -> IntVar
-        self.total_time = {}  # Общее время смены машины k -> IntVar
+        # Объемы (m_lt'vk0Wb и m_lt'vk1Wb)
+        self.delivered_vol = {}  # m_lt'vk0 (сколько привезли бренда b в точку l машиной k)
+        self.pickup_vol = {}  # m_lt'vk1 (сколько забрали бренда b из точки l машиной k)
 
-        # Инициализация
-        self._init_routing_vars()
-        self._init_load_and_delivery_vars()
-        self._init_time_vars()
-        self._init_warehouse_vars()
+        # Складские переменные
+        self.wh_active = {}  # w_I (используется ли склад)
+        self.wh_max_vol = {}  # w_iv (пиковый объем склада за все время)
+        self.wh_stock_brand = {}  # w_it'b (остаток бренда b на складе после визита машины v)
 
-    def _init_routing_vars(self):
-        """Создание x_kij и вспомогательных переменных активности ТС"""
+        # Итоги по машинам для целевой функции
+        self.vehicle_used = {}  # w_I для машин
+        self.total_dist = {}  # k_is'' (общий путь)
+        self.total_time = {}  # k_it'' (время смены: m_kfinish - m_kstart)
+        self.shift_start = {}  # m_kstart (время начала работы водителя)
+        self.shift_end = {}  # m_kfinish (время окончания работы водителя)
+
+        # Запуск инициализации
+        self._init_all_vars()
+
+    def _init_all_vars(self):
         loc_ids = self.scenario.location_ids
         for v in self.scenario.vehicles:
-            # Машина используется, если она выехала из любого склада
+            # Машины и параметры смен
             self.vehicle_used[v.id] = self.model.NewBoolVar(f'used_v{v.id}')
+            self.total_dist[v.id] = self.model.NewIntVar(0, 500_000, f'dist_v{v.id}')
+            self.total_time[v.id] = self.model.NewIntVar(0, 1440, f'total_t_v{v.id}')
+            self.shift_start[v.id] = self.model.NewIntVar(0, 1440, f'start_v{v.id}')
+            self.shift_end[v.id] = self.model.NewIntVar(0, 1440, f'end_v{v.id}')
 
-            for i in loc_ids:
-                for j in loc_ids:
-                    if i != j:
-                        self.x[(v.id, i, j)] = self.model.NewBoolVar(f'x_v{v.id}_i{i}_j{j}')
-
-            # Переменные для итогов по машине (нужны для числителя формулы)
-            self.total_dist[v.id] = self.model.NewIntVar(0, 100_000, f'dist_v{v.id}')
-            self.total_time[v.id] = self.model.NewIntVar(0, 1440, f'time_v{v.id}')
-
-    def _init_load_and_delivery_vars(self):
-        """Создание переменных для k_iq и m_lt'vk0Wb"""
-        for v in self.scenario.vehicles:
             for loc in self.scenario.all_locations:
-                # k_iq: объем в ящиках в момент выезда из точки i
-                self.load_at_point[(v.id, loc.id)] = self.model.NewIntVar(
-                    0, v.capacity, f'load_v{v.id}_loc{loc.id}'
-                )
+                # Временные метки и загрузка машины
+                self.arrival_times[(v.id, loc.id)] = self.model.NewIntVar(0, 1440, f'arr_v{v.id}_l{loc.id}')
+                self.load_at_point[(v.id, loc.id)] = self.model.NewIntVar(0, v.capacity, f'load_v{v.id}_l{loc.id}')
 
-                # Если точка — это магазин, создаем переменные доставки по брендам
-                if isinstance(loc, Store):
-                    for brand in self.scenario.brands:
-                        self.delivered_vol[(v.id, loc.id, brand.id)] = self.model.NewIntVar(
-                            0, v.capacity, f'deliv_v{v.id}_s{loc.id}_b{brand.id}'
-                        )
+                # Детализация по брендам
+                for b in self.scenario.brands:
+                    self.delivered_vol[(v.id, loc.id, b.id)] = self.model.NewIntVar(0, v.capacity,
+                                                                                    f'del_v{v.id}_l{loc.id}_b{b.id}')
+                    self.pickup_vol[(v.id, loc.id, b.id)] = self.model.NewIntVar(0, v.capacity,
+                                                                                 f'pick_v{v.id}_l{loc.id}_b{b.id}')
 
-    def _init_time_vars(self):
-        """Создание m_it'k (время прибытия)"""
-        for v in self.scenario.vehicles:
-            for loc in self.scenario.all_locations:
-                # Время в минутах (0-1440)
-                self.arrival_times[(v.id, loc.id)] = self.model.NewIntVar(
-                    0, 1440, f'arr_v{v.id}_loc{loc.id}'
-                )
+                # Маршрутные бинарные переменные
+                for j_id in loc_ids:
+                    if loc.id != j_id:
+                        self.x[(v.id, loc.id, j_id)] = self.model.NewBoolVar(f'x_v{v.id}_{loc.id}_{j_id}')
 
-    def _init_warehouse_vars(self):
-        """Создание w_I и w_iv"""
+        # Параметры складов
         for wh in self.scenario.warehouses:
             self.wh_active[wh.id] = self.model.NewBoolVar(f'wh_active_{wh.id}')
-            self.wh_max_vol[wh.id] = self.model.NewIntVar(0, 1_000_000, f'wh_vol_{wh.id}')
+            self.wh_max_vol[wh.id] = self.model.NewIntVar(0, 1_000_000, f'wh_max_v{wh.id}')
 
-    # --- Геттеры для соблюдения инкапсуляции ---
+            for b in self.scenario.brands:
+                for v in self.scenario.vehicles:
+                    # Динамический остаток (w_it'b)
+                    self.wh_stock_brand[(wh.id, b.id, v.id)] = self.model.NewIntVar(0, 1_000_000,
+                                                                                    f'stock_w{wh.id}_b{b.id}_v{v.id}')
 
-    def get_routing_var(self, v_id: int, i: int, j: int):
+    # --- Геттеры для СЛОЯ 3 ---
+
+    def get_routing_var(self, v_id: int, i: int, j: int) -> Optional[cp_model.BoolVar]:
         return self.x.get((v_id, i, j))
 
-    def get_arrival_var(self, v_id: int, loc_id: int):
-        return self.arrival_times.get((v_id, loc_id))
+    def get_arrival_var(self, v_id: int, loc_id: int) -> cp_model.IntVar:
+        return self.arrival_times[(v_id, loc_id)]
 
-    def get_delivery_vars_for_store(self, store_id: int):
-        """Возвращает все переменные доставки во все машины для конкретного магазина"""
-        return [self.delivered_vol[k, s, b]
-                for (k, s, b) in self.delivered_vol
-                if s == store_id]
+    def get_delivery_var(self, v_id: int, loc_id: int, brand_id: str) -> cp_model.IntVar:
+        return self.delivered_vol[(v_id, loc_id, brand_id)]
+
+    def get_pickup_var(self, v_id: int, loc_id: int, brand_id: str) -> cp_model.IntVar:
+        return self.pickup_vol[(v_id, loc_id, brand_id)]
