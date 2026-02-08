@@ -1,3 +1,5 @@
+# --- START OF FILE var_manager.py ---
+
 from ortools.sat.python import cp_model
 from typing import Dict, Tuple, List, Optional
 
@@ -14,6 +16,7 @@ class VarManager:
         # --- РЕЕСТРЫ ПЕРЕМЕННЫХ ---
         self.x = {}  # x_kij (движение: машина k из i в j)
         self.arrival_times = {}  # m_jt'k (время прибытия машины k в точку j)
+        self.load_arriving = {} # load_arriving_k_j (загрузка ТС в ящиках при прибытии в точку j)
         self.load_at_point = {}  # k_iq (загрузка ТС в ящиках при выезде из точки i)
 
         # Объемы (m_lt'vk0Wb и m_lt'vk1Wb)
@@ -22,8 +25,13 @@ class VarManager:
 
         # Складские переменные
         self.wh_active = {}  # w_I (используется ли склад)
-        self.wh_max_vol = {}  # w_iv (пиковый объем склада за все время)
-        self.wh_stock_brand = {}  # w_it'b (остаток бренда b на складе после визита машины v)
+        # wh_max_vol теперь будет представлять ОБЩИЙ ПОТОК (обработанный объем) для расчета стоимости склада
+        self.wh_max_vol = {}  # w_iv (общий объем, прошедший через склад)
+
+        # Переменные для ReservoirConstraint
+        self.wh_stock_change_per_visit = {} # (wh_id, b_id, v_id) -> IntVar (delivered - pickedup)
+        self.wh_visit_intervals = {} # (wh_id, v_id) -> IntervalVar (ОДИН интервал на ВИЗИТ машины на склад)
+        self.wh_visit_active_flags = {} # (wh_id, v_id) -> BoolVar (активен ли визит машины на склад)
 
         # Итоги по машинам для целевой функции
         self.vehicle_used = {}  # w_I для машин
@@ -34,18 +42,15 @@ class VarManager:
 
         # Запуск инициализации
         self._init_all_vars()
+        self.add_load_arriving_vars()
 
     def _init_all_vars(self):
         """
         Инициализация переменных с использованием фильтрации маршрутов (RoutePruner).
         """
-        # 1. Получаем список разрешенных пар (i, j) от Прунера
-        # Это исключает создание лишних x_kij переменных
         allowed_pairs = self.pruner.get_allowed_pairs()
-        loc_ids = self.scenario.location_ids
 
         for v in self.scenario.vehicles:
-            # Параметры использования ТС (w_I, k_is'', k_it'')
             self.vehicle_used[v.id] = self.model.NewBoolVar(f'used_v{v.id}')
             self.total_dist[v.id] = self.model.NewIntVar(0, 1_000_000, f'dist_v{v.id}')
             self.total_time[v.id] = self.model.NewIntVar(0, 1440, f'total_t_v{v.id}')
@@ -53,45 +58,73 @@ class VarManager:
             self.shift_end[v.id] = self.model.NewIntVar(0, 1440, f'end_v{v.id}')
 
             for loc in self.scenario.all_locations:
-                # Временные метки (m_it'k) и загрузка машины (k_iq)
                 self.arrival_times[(v.id, loc.id)] = self.model.NewIntVar(0, 1440, f'arr_v{v.id}_l{loc.id}')
-                self.load_at_point[(v.id, loc.id)] = self.model.NewIntVar(0, v.capacity, f'load_v{v.id}_l{loc.id}')
+                self.load_at_point[(v.id, loc.id)] = self.model.NewIntVar(0, v.capacity, f'load_out_v{v.id}_l{loc.id}')
 
-                # Детализация привоза/увоза по брендам (m_lt'vk0Wb, m_lt'vk1Wb)
                 for b in self.scenario.brands:
-                    self.delivered_vol[(v.id, loc.id, b.id)] = self.model.NewIntVar(
-                        0, v.capacity, f'del_v{v.id}_l{loc.id}_b{b.id}'
-                    )
-                    self.pickup_vol[(v.id, loc.id, b.id)] = self.model.NewIntVar(
-                        0, v.capacity, f'pick_v{v.id}_l{loc.id}_b{b.id}'
-                    )
+                    self.delivered_vol[(v.id, loc.id, b.id)] = self.model.NewIntVar(0, v.capacity, f'del_v{v.id}_l{loc.id}_b{b.id}')
+                    self.pickup_vol[(v.id, loc.id, b.id)] = self.model.NewIntVar(0, v.capacity, f'pick_v{v.id}_l{loc.id}_b{b.id}')
 
-            # Создаем переменные движения x_kij только для разрешенных пар
             for i_id, j_id in allowed_pairs:
                 self.x[(v.id, i_id, j_id)] = self.model.NewBoolVar(f'x_v{v.id}_{i_id}_{j_id}')
 
-        # Параметры складов/РЦ (w_I, w_iv, w_it'b)
         for wh in self.scenario.warehouses:
             self.wh_active[wh.id] = self.model.NewBoolVar(f'wh_active_{wh.id}')
-            self.wh_max_vol[wh.id] = self.model.NewIntVar(0, 2_000_000, f'wh_max_v{wh.id}')
+            self.wh_max_vol[wh.id] = self.model.NewIntVar(0, 10_000_000, f'wh_max_flow_w{wh.id}')
 
-            for b in self.scenario.brands:
-                for v in self.scenario.vehicles:
-                    # Динамический остаток бренда на складе
-                    self.wh_stock_brand[(wh.id, b.id, v.id)] = self.model.NewIntVar(
-                        0, 2_000_000, f'stock_w{wh.id}_b{b.id}_v{v.id}'
+            for v in self.scenario.vehicles:
+                # Один интервал на визит машины v на склад wh.
+                # Он будет активен, если машина посещает склад.
+                self.wh_visit_active_flags[(wh.id, v.id)] = self.model.NewBoolVar(f'wh_visit_active_w{wh.id}_v{v.id}')
+                self.wh_visit_intervals[(wh.id, v.id)] = self.model.NewOptionalIntervalVar(
+                    self.model.NewIntVar(0, 1440, f'wh_int_start_w{wh.id}_v{v.id}'), # start
+                    self.model.NewIntVar(0, 1440, f'wh_int_dur_w{wh.id}_v{v.id}'),   # duration
+                    self.model.NewIntVar(0, 2880, f'wh_int_end_w{wh.id}_v{v.id}'),   # end
+                    self.wh_visit_active_flags[(wh.id, v.id)],                      # is_present
+                    f'wh_visit_int_w{wh.id}_v{v.id}'
+                )
+
+                for b in self.scenario.brands:
+                    # Изменение запаса для бренда B на складе WH, вызванное визитом машины V
+                    self.wh_stock_change_per_visit[(wh.id, b.id, v.id)] = self.model.NewIntVar(
+                        -v.capacity, v.capacity, f'stock_change_w{wh.id}_b{b.id}_v{v.id}'
                     )
 
-    # --- Геттеры для СЛОЯ 3 ---
+    def add_load_arriving_vars(self):
+        for v in self.scenario.vehicles:
+            for loc in self.scenario.all_locations:
+                self.load_arriving[(v.id, loc.id)] = self.model.NewIntVar(0, v.capacity, f"load_arr_v{v.id}_l{loc.id}")
 
+    # --- Геттеры ---
     def get_routing_var(self, v_id: int, i: int, j: int) -> Optional[cp_model.BoolVar]:
         return self.x.get((v_id, i, j))
-
     def get_arrival_var(self, v_id: int, loc_id: int) -> cp_model.IntVar:
         return self.arrival_times[(v_id, loc_id)]
-
+    def get_load_arriving_var(self, v_id: int, loc_id: int) -> cp_model.IntVar:
+        return self.load_arriving[(v_id, loc_id)]
+    def get_load_at_point_var(self, v_id: int, loc_id: int) -> cp_model.IntVar:
+        return self.load_at_point[(v_id, loc_id)]
     def get_delivery_var(self, v_id: int, loc_id: int, brand_id: str) -> cp_model.IntVar:
         return self.delivered_vol[(v_id, loc_id, brand_id)]
-
     def get_pickup_var(self, v_id: int, loc_id: int, brand_id: str) -> cp_model.IntVar:
         return self.pickup_vol[(v_id, loc_id, brand_id)]
+    def get_wh_active_var(self, wh_id: int) -> cp_model.BoolVar:
+        return self.wh_active[wh_id]
+    def get_wh_max_vol_var(self, wh_id: int) -> cp_model.IntVar:
+        return self.wh_max_vol[wh_id]
+    def get_wh_stock_change_per_visit_var(self, wh_id: int, brand_id: str, v_id: int) -> cp_model.IntVar:
+        return self.wh_stock_change_per_visit[(wh_id, brand_id, v_id)]
+    def get_wh_visit_interval_var(self, wh_id: int, v_id: int) -> cp_model.IntervalVar:
+        return self.wh_visit_intervals[(wh_id, v_id)]
+    def get_wh_visit_active_flag(self, wh_id: int, v_id: int) -> cp_model.BoolVar:
+        return self.wh_visit_active_flags[(wh_id, v_id)]
+    def get_vehicle_used_var(self, v_id: int) -> cp_model.BoolVar:
+        return self.vehicle_used[v_id]
+    def get_total_dist_var(self, v_id: int) -> cp_model.IntVar:
+        return self.total_dist[v_id]
+    def get_total_time_var(self, v_id: int) -> cp_model.IntVar:
+        return self.total_time[v_id]
+    def get_shift_start_var(self, v_id: int) -> cp_model.IntVar:
+        return self.shift_start[v_id]
+    def get_shift_end_var(self, v_id: int) -> cp_model.IntVar:
+        return self.shift_end[v_id]

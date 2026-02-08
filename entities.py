@@ -1,3 +1,4 @@
+# START OF FILE entities.py
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional
 
@@ -67,6 +68,8 @@ class Warehouse(Location):
     handling_speed: float  # w_iu
     # w_ib: какие бренды производит (если это завод)
     produced_brands: List[str] = field(default_factory=list)
+    # Дополнительно: начальный запас по брендам на складе
+    initial_stock: Dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
