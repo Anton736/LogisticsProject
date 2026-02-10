@@ -80,7 +80,7 @@ class ConstraintFactory:
                 incoming_vars = []
                 outgoing_vars = []
                 for i_id, j_id in allowed_pairs:
-                    x_var = self.var_manager.get_routing_var(v.id, i_id, j.id)
+                    x_var = self.var_manager.get_routing_var(v.id, i_id, j_id)
                     if x_var:
                         if j_id == loc.id: incoming_vars.append(x_var)
                         if i_id == loc.id: outgoing_vars.append(x_var)
@@ -91,9 +91,9 @@ class ConstraintFactory:
             # 3. Связь с общим пройденным расстоянием (k_is'')
             path_dist_terms = []
             for i_id, j_id in allowed_pairs:
-                x_var = self.var_manager.get_routing_var(v.id, i_id, j.id)
+                x_var = self.var_manager.get_routing_var(v.id, i_id, j_id)
                 if x_var:
-                    dist = self.scenario.network.distance_matrix[i_id][j.id]
+                    dist = self.scenario.network.distance_matrix[i_id][j_id]
                     path_dist_terms.append(x_var * int(dist * 100))
 
             total_dist_scaled = self.model.NewIntVar(0, 1_000_000 * 100, f'dist_scaled_v{v.id}')
@@ -161,7 +161,7 @@ class ConstraintFactory:
                 is_loc_visited = self.model.NewBoolVar(f"is_v{v.id}_visited_l{loc.id}_load_flow")
                 incoming_or_outgoing_arcs = []
                 for i_id, j_id in allowed_pairs:
-                    x_var = self.var_manager.get_routing_var(v.id, i_id, j.id)
+                    x_var = self.var_manager.get_routing_var(v.id, i_id, j_id)
                     if x_var:
                         if i_id == loc.id: incoming_or_outgoing_arcs.append(x_var)
                         if j_id == loc.id: incoming_or_outgoing_arcs.append(x_var)
@@ -447,10 +447,7 @@ class ConstraintFactory:
                                       for v_obj in self.scenario.vehicles for b_obj in self.scenario.brands)
                 self.model.Add(wh_max_vol == sum(wh.initial_stock.values()) + total_delivered).OnlyEnforceIf(wh_active)
             elif self.warehouse_cost_mode == WarehouseCostMode.EXACT_PEAK:
-                # Заглушка: пока считаем как PEAK_INPUT
-                total_delivered = sum(self.var_manager.get_delivery_var(v_obj.id, wh.id, b_obj.id)
-                                      for v_obj in self.scenario.vehicles for b_obj in self.scenario.brands)
-                self.model.Add(wh_max_vol == sum(wh.initial_stock.values()) + total_delivered).OnlyEnforceIf(wh_active)
+                pass  # wh_max_vol вычисляется в _add_exact_peak_warehouse_stock_constraints
 
             self.model.Add(wh_max_vol == 0).OnlyEnforceIf(wh_active.Not())
 
@@ -459,3 +456,172 @@ class ConstraintFactory:
                 if b.id not in wh.produced_brands:
                     for v_obj in self.scenario.vehicles:
                         self.model.Add(self.var_manager.get_pickup_var(v_obj.id, wh.id, b.id) == 0)
+
+        # EXACT_PEAK требует отдельного прохода после формирования всех before-переменных
+        if self.warehouse_cost_mode == WarehouseCostMode.EXACT_PEAK:
+            print("  Computing exact peak warehouse volumes via temporal event-chain...")
+            self._add_exact_peak_warehouse_stock_constraints()
+
+    def _add_exact_peak_warehouse_stock_constraints(self) -> None:
+        """
+        EXACT_PEAK: точный расчёт пикового объёма склада (w_iv) через событийную
+        временну́ю цепочку.
+
+        НЕ заменяет ReservoirConstraint — тот по-прежнему гарантирует, что
+        запас не уходит в минус. Этот метод только честно вычисляет wh_max_vol,
+        чтобы стоимость аренды склада считалась корректно.
+
+        Реализованные улучшения:
+          1. Event-Chain по РЕАЛЬНОМУ времени приезда (не по ID машины).
+          2. before[k1,k2] фиксирует временной порядок → Symmetry Breaking.
+          3. Ghost Pass: если машина не посещала склад, before=0 → contrib=0.
+          4. Pressure from Below: wh_max_vol >= stock_after каждого визита
+             (только линейные >= без тяжёлого AddMaxEquality).
+
+        Сложность по переменным (на 1 склад):
+          before:       K*(K-1)
+          net_del:      K*B
+          contrib:      K*(K-1)*B
+          stock_bef/aft: 2*K*B
+          При K=10, B=3: ~330 доп. переменных — быстро.
+          При K=50, B=3: ~7650 доп. переменных — рекомендуется PEAK_INPUT.
+        """
+        from typing import Dict, List, Tuple as T
+
+        BIG_M = 1440  # максимальное время суток (минуты)
+
+        for wh in self.scenario.warehouses:
+            wh_active  = self.var_manager.get_wh_active_var(wh.id)
+            wh_max_vol = self.var_manager.get_wh_max_vol_var(wh.id)
+            vehicles   = self.scenario.vehicles
+
+            # ----------------------------------------------------------------
+            # ШАГ 1 — before[k1_id, k2_id]: k1 приезжает на wh РАНЬШЕ k2
+            # ----------------------------------------------------------------
+            before: Dict[T[int, int], cp_model.BoolVar] = {}
+            for k1 in vehicles:
+                for k2 in vehicles:
+                    if k1.id == k2.id:
+                        continue
+                    before[(k1.id, k2.id)] = self.model.NewBoolVar(
+                        f"bef_w{wh.id}_{k1.id}_{k2.id}"
+                    )
+
+            for k1 in vehicles:
+                for k2 in vehicles:
+                    if k1.id >= k2.id:
+                        continue  # каждую пару разбираем один раз
+
+                    b12   = before[(k1.id, k2.id)]
+                    b21   = before[(k2.id, k1.id)]
+                    is_k1 = self.var_manager.get_wh_visit_active_flag(wh.id, k1.id)
+                    is_k2 = self.var_manager.get_wh_visit_active_flag(wh.id, k2.id)
+                    arr1  = self.var_manager.get_arrival_var(k1.id, wh.id)
+                    arr2  = self.var_manager.get_arrival_var(k2.id, wh.id)
+
+                    # Оба посещают → ровно один из них "раньше"
+                    self.model.Add(b12 + b21 == 1).OnlyEnforceIf([is_k1, is_k2])
+
+                    # Временна́я привязка: b12=1 → arr1 <= arr2
+                    self.model.Add(arr1 <= arr2).OnlyEnforceIf([b12, is_k1, is_k2])
+                    self.model.Add(arr2 <= arr1).OnlyEnforceIf([b21, is_k1, is_k2])
+
+                    # k1 не посещает → k1 не может быть "раньше" k2
+                    self.model.Add(b12 == 0).OnlyEnforceIf(is_k1.Not())
+                    # k2 не посещает → k2 не может быть "раньше" k1
+                    self.model.Add(b21 == 0).OnlyEnforceIf(is_k2.Not())
+
+            # ----------------------------------------------------------------
+            # ШАГИ 2-3 — net_del, contrib, stock_before, stock_after (по брендам)
+            # ----------------------------------------------------------------
+            # Накапливаем stock_after[k] по всем брендам для шага 4.
+            stock_after_per_vehicle: Dict[int, List[cp_model.IntVar]] = {
+                k.id: [] for k in vehicles
+            }
+
+            for b in self.scenario.brands:
+                initial_b = wh.initial_stock.get(b.id, 0)
+                max_possible = sum(k.capacity for k in vehicles) + initial_b
+
+                # --- net_del[k] = delivered[k,wh,b] - pickup[k,wh,b] ---
+                net_del: Dict[int, cp_model.IntVar] = {}
+                for k in vehicles:
+                    nd = self.model.NewIntVar(
+                        -k.capacity, k.capacity,
+                        f"nd_w{wh.id}_b{b.id}_k{k.id}"
+                    )
+                    self.model.Add(
+                        nd == self.var_manager.get_delivery_var(k.id, wh.id, b.id)
+                           - self.var_manager.get_pickup_var(k.id, wh.id, b.id)
+                    )
+                    net_del[k.id] = nd
+
+                # --- contrib[k_src, k_dst] = net_del[k_src] * before[k_src, k_dst] ---
+                # Линеаризация через OnlyEnforceIf (без AddMultiplicationEquality).
+                # Ghost Pass: если k_src не посещал склад, before=0 → contrib=0.
+                contrib: Dict[T[int, int], cp_model.IntVar] = {}
+                for k_src in vehicles:
+                    for k_dst in vehicles:
+                        if k_src.id == k_dst.id:
+                            continue
+                        c = self.model.NewIntVar(
+                            -k_src.capacity, k_src.capacity,
+                            f"ctr_w{wh.id}_b{b.id}_{k_src.id}_{k_dst.id}"
+                        )
+                        bv = before[(k_src.id, k_dst.id)]
+                        self.model.Add(c == net_del[k_src.id]).OnlyEnforceIf(bv)
+                        self.model.Add(c == 0).OnlyEnforceIf(bv.Not())
+                        contrib[(k_src.id, k_dst.id)] = c
+
+                # --- stock_before[k], stock_after[k] ---
+                for k in vehicles:
+                    is_k = self.var_manager.get_wh_visit_active_flag(wh.id, k.id)
+
+                    # stock_before_k = initial_b + Σ contrib[k', k]  (k' ≠ k)
+                    # "Сколько товара бренда b на складе прямо перед приездом машины k"
+                    sum_before_k = initial_b + sum(
+                        contrib[(k2.id, k.id)]
+                        for k2 in vehicles if k2.id != k.id
+                    )
+                    stock_bef = self.model.NewIntVar(
+                        0, max_possible, f"sbef_w{wh.id}_b{b.id}_k{k.id}"
+                    )
+                    self.model.Add(stock_bef == sum_before_k).OnlyEnforceIf(is_k)
+                    self.model.Add(stock_bef == 0).OnlyEnforceIf(is_k.Not())
+
+                    # stock_after_k = stock_before_k + net_del[k]
+                    # "Сколько товара бренда b остаётся после обслуживания машины k"
+                    stock_aft = self.model.NewIntVar(
+                        0, max_possible, f"saft_w{wh.id}_b{b.id}_k{k.id}"
+                    )
+                    self.model.Add(
+                        stock_aft == stock_bef + net_del[k.id]
+                    ).OnlyEnforceIf(is_k)
+                    self.model.Add(stock_aft == 0).OnlyEnforceIf(is_k.Not())
+
+                    stock_after_per_vehicle[k.id].append(stock_aft)
+
+            # ----------------------------------------------------------------
+            # ШАГ 4 — "Давление снизу": wh_max_vol >= суммарный объём после каждого визита
+            # ----------------------------------------------------------------
+            # Линейные >= вместо AddMaxEquality — солвер сам "сдавит" wh_max_vol
+            # до наименьшего значения, покрывающего все пики.
+            max_total_brands = sum(k.capacity for k in vehicles) * len(self.scenario.brands)
+            for k in vehicles:
+                if not stock_after_per_vehicle[k.id]:
+                    continue
+
+                is_k = self.var_manager.get_wh_visit_active_flag(wh.id, k.id)
+
+                # Суммарный объём всех брендов на складе после визита машины k
+                total_after_k = self.model.NewIntVar(
+                    0, max_total_brands,
+                    f"tot_saft_w{wh.id}_k{k.id}"
+                )
+                self.model.Add(
+                    total_after_k == sum(stock_after_per_vehicle[k.id])
+                ).OnlyEnforceIf(is_k)
+                self.model.Add(total_after_k == 0).OnlyEnforceIf(is_k.Not())
+
+                # Давление снизу: wh_max_vol должен покрыть этот пик
+                self.model.Add(wh_max_vol >= total_after_k).OnlyEnforceIf(is_k)

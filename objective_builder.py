@@ -6,8 +6,6 @@ from entities import Scenario, Store, Warehouse  # Добавляем Warehouse 
 from var_manager import VarManager
 
 
-# from cost_calculators import CostComponentCalculator # <-- Больше не нужен, упрощаем!
-
 
 class ObjectiveBuilder:
     def __init__(self, model: cp_model.CpModel, scenario: Scenario, var_manager: VarManager, scale_factor: int = 1000):
@@ -64,11 +62,7 @@ class ObjectiveBuilder:
             self.model.Add(warehouse_cost_var == 0).OnlyEnforceIf(self.model.Not(wh_active))
 
             total_cost_numerator_terms.append(warehouse_cost_var)
-        for v in self.scenario.vehicles:
-            for loc in self.scenario.all_locations:
-                arrival_var = self.var_manager.get_arrival_var(v.id, loc.id)
-                if arrival_var:
-                    total_cost_numerator_terms.append(arrival_var)
+
         numerator_expr = sum(total_cost_numerator_terms)
 
         # --- Знаменатель: Общая стоимость доставленного товара ---
