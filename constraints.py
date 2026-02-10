@@ -462,6 +462,27 @@ class ConstraintFactory:
             print("  Computing exact peak warehouse volumes via temporal event-chain...")
             self._add_exact_peak_warehouse_stock_constraints()
 
+    def _get_eligible_vehicles_for_wh(self, wh_id: int) -> list:
+        """
+        K_eff: возвращает только машины, у которых существует хотя бы одна
+        разрешённая дуга, связанная со складом wh_id (т.е. машина физически
+        может туда приехать или оттуда уехать).
+
+        Это позволяет пропустить машины которые гарантированно не посетят склад
+        (например, после обрезки дуг в RoutePruner), уменьшая размер EXACT_PEAK.
+        """
+        eligible = []
+        for v in self.scenario.vehicles:
+            has_arc = any(
+                self.var_manager.get_routing_var(v.id, wh_id, loc.id) is not None
+                or self.var_manager.get_routing_var(v.id, loc.id, wh_id) is not None
+                for loc in self.scenario.all_locations
+                if loc.id != wh_id
+            )
+            if has_arc:
+                eligible.append(v)
+        return eligible
+
     def _add_exact_peak_warehouse_stock_constraints(self) -> None:
         """
         EXACT_PEAK: точный расчёт пикового объёма склада (w_iv) через событийную
@@ -478,22 +499,41 @@ class ConstraintFactory:
           4. Pressure from Below: wh_max_vol >= stock_after каждого визита
              (только линейные >= без тяжёлого AddMaxEquality).
 
-        Сложность по переменным (на 1 склад):
-          before:       K*(K-1)
-          net_del:      K*B
-          contrib:      K*(K-1)*B
-          stock_bef/aft: 2*K*B
-          При K=10, B=3: ~330 доп. переменных — быстро.
-          При K=50, B=3: ~7650 доп. переменных — рекомендуется PEAK_INPUT.
+        Дополнительные оптимизации (vs предыдущей версии):
+          5. Заводы (wh.is_factory=True) пропускаются — их w_iv не оплачивается.
+          6. K_eff: используются только машины с хотя бы одной дугой к РЦ.
+             После обрезки в RoutePruner это может существенно уменьшить K.
+
+        Сложность по переменным (на 1 РЦ):
+          before:       K_eff*(K_eff-1)
+          net_del:      K_eff*B
+          contrib:      K_eff*(K_eff-1)*B
+          stock_bef/aft: 2*K_eff*B
+          При K_eff=4, B=3: ~66 доп. переменных — очень быстро.
+          При K_eff=10, B=3: ~330 доп. переменных — быстро.
+          При K_eff>30: рекомендуется PEAK_INPUT.
         """
         from typing import Dict, List, Tuple as T
 
-        BIG_M = 1440  # максимальное время суток (минуты)
-
         for wh in self.scenario.warehouses:
+            # Заводы: w_iv не оплачивается и не нуждается в точном расчёте пика
+            if wh.is_factory:
+                continue
+
             wh_active  = self.var_manager.get_wh_active_var(wh.id)
             wh_max_vol = self.var_manager.get_wh_max_vol_var(wh.id)
-            vehicles   = self.scenario.vehicles
+
+            # K_eff: только машины с хотя бы одной дугой к этому РЦ
+            vehicles = self._get_eligible_vehicles_for_wh(wh.id)
+            if not vehicles:
+                # Нет ни одной возможной дуги к этому РЦ — он никогда не будет посещён
+                self.model.Add(wh_max_vol == 0)
+                continue
+
+            k_total = len(self.scenario.vehicles)
+            k_eff   = len(vehicles)
+            if k_eff < k_total:
+                print(f"  EXACT_PEAK: warehouse {wh.id} uses K_eff={k_eff} (of {k_total} total vehicles)")
 
             # ----------------------------------------------------------------
             # ШАГ 1 — before[k1_id, k2_id]: k1 приезжает на wh РАНЬШЕ k2

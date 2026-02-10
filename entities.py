@@ -70,7 +70,7 @@ class Warehouse(Location):
     produced_brands: List[str] = field(default_factory=list)
     # Дополнительно: начальный запас по брендам на складе
     initial_stock: Dict[str, int] = field(default_factory=dict)
-
+    is_factory: bool = False
 
 @dataclass
 class WarehouseAssignment:
