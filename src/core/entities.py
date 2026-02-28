@@ -1,6 +1,6 @@
 # START OF FILE entities.py
 from dataclasses import dataclass, field
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict
 
 
 @dataclass(frozen=True)
@@ -25,12 +25,17 @@ class Vehicle:
         # Внутренняя логика, не зависящая от решения
         return self.cost_km / self.capacity
 
+@dataclass
+class Location:
+    id: int
+    name: str
+
 
 @dataclass
 class VehicleAssignment:
     """Класс для хранения РЕЗУЛЬТАТОВ решения для конкретной машины"""
     vehicle: Vehicle
-    route: List[int]  # Список ID локаций
+    route: List[Location]  # Список ID локаций
     total_time: float = 0.0  # k_it'' (время использования)
     total_dist: float = 0.0  # k_is'' (пройденный путь)
     is_active: bool = False  # w_I (используется ли вообще)
@@ -44,10 +49,6 @@ class VehicleAssignment:
                 self.vehicle.cost_km * self.total_dist)
 
 
-@dataclass
-class Location:
-    id: int
-    name: str
 
 
 @dataclass

@@ -1,7 +1,7 @@
 # --- START OF FILE var_manager.py ---
 
 from ortools.sat.python import cp_model
-from typing import Dict, Tuple, List, Optional
+from typing import Optional
 
 from pruner import RoutePruner
 from src.core.entities import Scenario, Store, Warehouse

@@ -37,13 +37,16 @@ class LogisticsExcelLoader(BaseDataLoader):
         for _, row in df_work.iterrows():
             # Потребность в ящиках (Demand)
             crates_plan = NumericParser.to_int(row.get(self.map.col_demand_crates))
+            store_demands = {
+                main_brand.id: {1440: crates_plan}  # 1440 - конец суток
+            }
 
             store = Store(
                 id=NumericParser.to_int(row[self.map.col_id]),
                 name=str(row[self.map.col_name]),
                 time_start=TimeParser.to_minutes(row[self.map.col_window_from]),
                 time_end=TimeParser.to_minutes(row[self.map.col_window_to]),
-                demands={main_brand.id: crates_plan}
+                demands=store_demands
             )
             # Дополнительно можем сохранить координаты в атрибут, если расширим класс Store
             # coords = CoordinateParser.parse(row[self.map.col_coords])
@@ -65,17 +68,7 @@ class LogisticsExcelLoader(BaseDataLoader):
 
         # 5. Транспорт (Vehicles)
         # Создаем парк машин (например, 10 одинаковых машин на основе ставок из Excel)
-        vehicles = []
-        for i in range(1, 11):
-            vehicles.append(Vehicle(
-                id=i,
-                category="Standard",
-                cost_call=driver_rate,
-                cost_hour=hour_rate,
-                cost_km=km_rate,
-                capacity=500,  # Вместимость в ящиках (нужно добавить в Excel позже)
-                unloading_speed=1.0  # 1 ящик в минуту
-            ))
+        vehicles = self._create_vehicles(driver_rate, km_rate, hour_rate)
 
         # 6. Сеть (Network)
         # Пока матриц нет, создаем пустую (заглушку)
@@ -92,3 +85,10 @@ class LogisticsExcelLoader(BaseDataLoader):
             brands=[main_brand],
             network=network
         )
+
+    def _create_vehicles(self, dr, km, hr) -> List[Vehicle]:
+        # В идеале эти числа (10, 500) тоже должны быть в Excel или внешнем config.yaml
+        count = 10
+        cap = 500
+        return [Vehicle(id=i, cost_call=dr, cost_km=km, cost_hour=hr, capacity=cap, unloading_speed=1.0)
+                for i in range(1, count + 1)]

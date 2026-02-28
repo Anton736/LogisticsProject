@@ -1,6 +1,6 @@
 # START OF FILE dinkelbach_orchestrator.py
 from ortools.sat.python import cp_model
-from typing import Tuple, Optional, Dict, Any
+from typing import Optional, Dict, Any
 
 from src.core.entities import Scenario
 from var_manager import VarManager
@@ -12,7 +12,6 @@ from src.core.enums import WarehouseCostMode
 from src.models.solution import Solution  # Будет создан ниже
 from src.io.solution_presenter import SolutionPresenter  # Будет создан ниже
 
-import math
 
 
 class DinkelbachOrchestrator:
@@ -46,7 +45,7 @@ class DinkelbachOrchestrator:
 
         # Масштабирующий фактор для лямбды, чтобы она была int при умножении на denominator_expr
         # Если OBJ_SCALE = 1000 (3 знака), а нам нужна лямбда с 6-8 знаками, то 10^9 или 10^12
-        LAMBDA_SCALE_FACTOR = 1_000_000_000  # 9 знаков после запятой для лямбда
+        LAMBDA_SCALE_FACTOR = 100_000  # 9 знаков после запятой для лямбда
 
         print(f"Starting Dinkelbach algorithm with epsilon={epsilon}, max_iterations={max_iterations}")
         print(f"Objective scaling factor: {self.objective_scale_factor}, Lambda scaling factor: {LAMBDA_SCALE_FACTOR}")

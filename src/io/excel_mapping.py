@@ -23,3 +23,11 @@ class ExcelMapping:
     label_driver_rate: str = "Ставка водителя"
     label_km_rate: str = "стоимость на 1 км"
     label_hour_rate: str = "стоимость на 1 час"
+
+    # Справочник
+    col_price_per_unit: str = "средняя цена за единицу продукции"
+    col_units_in_crate: str = "кол-во ед. в ящике"
+
+    # Параметры авто (если решим добавить в Excel)
+    col_veh_capacity: str = "вместимость_ящиков"
+    col_veh_count: str = "колво_машин"

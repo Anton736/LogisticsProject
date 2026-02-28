@@ -1,6 +1,6 @@
 # START OF FILE RouterPruner.py
-from dataclasses import dataclass, field
-from typing import List, Tuple, Dict, Set, FrozenSet, Optional
+from dataclasses import dataclass
+from typing import List, Tuple, Dict, Set,  Optional
 from src.core.entities import Scenario, Location, Store, Warehouse
 
 

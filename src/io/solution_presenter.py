@@ -1,8 +1,8 @@
 # START OF FILE solution_presenter.py
 from ortools.sat.python import cp_model
-from typing import List, Dict, Tuple, Any
+from typing import List, Dict
 
-from src.core.entities import Scenario, Vehicle, Store, Warehouse, VehicleAssignment, WarehouseAssignment, Location
+from src.core.entities import Scenario, Vehicle, Warehouse, VehicleAssignment, WarehouseAssignment, Location
 from src.optimization.var_manager import VarManager
 from src.models.solution import Solution
 

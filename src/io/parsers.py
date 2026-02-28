@@ -1,6 +1,7 @@
 from datetime import time
 from typing import Any, Tuple, Optional
 import pandas as pd
+import logging
 
 class TimeParser:
     """Логика для времени и длительности"""
@@ -12,7 +13,9 @@ class TimeParser:
             try:
                 h, m = map(int, value.strip().split(':'))
                 return h * 60 + m
-            except: return 0
+            except ValueError as e:
+                logging.error(f"Ошибка формата времени в строке '{value}': {e}")
+            raise
         return 0
 
 class CoordinateParser:
@@ -23,7 +26,9 @@ class CoordinateParser:
         try:
             parts = value.replace(' ', '').split(',')
             return float(parts[0]), float(parts[1])
-        except: return 0.0, 0.0
+        except ValueError as e:
+            logging.error(f"Ошибка формата координат в строке '{value}': {e}")
+        raise
 
 class RateExtractor:
     """Логика поиска ставок в справочнике"""
