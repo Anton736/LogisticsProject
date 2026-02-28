@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 from typing import List
 
-from entities import VehicleAssignment, WarehouseAssignment
+from src.core.entities import VehicleAssignment, WarehouseAssignment
 
 
 @dataclass

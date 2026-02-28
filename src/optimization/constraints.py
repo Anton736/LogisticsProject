@@ -2,11 +2,11 @@
 from ortools.sat.python import cp_model
 from typing import List, Tuple, Dict, Any
 
-from entities import Scenario, Store, Warehouse, Location, Vehicle, Brand
+from src.core.entities import Scenario, Store, Warehouse, Location, Vehicle, Brand
 from var_manager import VarManager
-from RouterPruner import RoutePruner
-from DemandStep import DemandManager
-from enums import WarehouseCostMode
+from pruner import RoutePruner
+from src.models.demand import DemandManager
+from src.core.enums import WarehouseCostMode
 
 class ConstraintFactory:
     def __init__(self, model: cp_model.CpModel, scenario: Scenario, var_manager: VarManager, demand_manager: DemandManager, pruner: RoutePruner, warehouse_cost_mode: WarehouseCostMode = WarehouseCostMode.PEAK_INPUT):

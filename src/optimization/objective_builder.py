@@ -2,7 +2,7 @@
 from ortools.sat.python import cp_model
 from typing import Tuple, List
 
-from entities import Scenario, Store, Warehouse  # Добавляем Warehouse для явного использования
+from src.core.entities import Scenario, Store, Warehouse  # Добавляем Warehouse для явного использования
 from var_manager import VarManager
 
 

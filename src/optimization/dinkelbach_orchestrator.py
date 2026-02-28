@@ -2,15 +2,15 @@
 from ortools.sat.python import cp_model
 from typing import Tuple, Optional, Dict, Any
 
-from entities import Scenario
+from src.core.entities import Scenario
 from var_manager import VarManager
-from RouterPruner import RoutePruner
-from DemandStep import DemandManager
+from pruner import RoutePruner
+from src.models.demand import DemandManager
 from constraints import ConstraintFactory
 from objective_builder import ObjectiveBuilder
-from enums import WarehouseCostMode
-from solution import Solution  # Будет создан ниже
-from solution_presenter import SolutionPresenter  # Будет создан ниже
+from src.core.enums import WarehouseCostMode
+from src.models.solution import Solution  # Будет создан ниже
+from src.io.solution_presenter import SolutionPresenter  # Будет создан ниже
 
 import math
 

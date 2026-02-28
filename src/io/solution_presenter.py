@@ -2,9 +2,9 @@
 from ortools.sat.python import cp_model
 from typing import List, Dict, Tuple, Any
 
-from entities import Scenario, Vehicle, Store, Warehouse, VehicleAssignment, WarehouseAssignment, Location
-from var_manager import VarManager
-from solution import Solution
+from src.core.entities import Scenario, Vehicle, Store, Warehouse, VehicleAssignment, WarehouseAssignment, Location
+from src.optimization.var_manager import VarManager
+from src.models.solution import Solution
 
 
 class SolutionPresenter:

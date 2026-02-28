@@ -3,8 +3,8 @@
 from ortools.sat.python import cp_model
 from typing import Dict, Tuple, List, Optional
 
-from RouterPruner import RoutePruner
-from entities import Scenario, Store, Warehouse
+from pruner import RoutePruner
+from src.core.entities import Scenario, Store, Warehouse
 
 
 class VarManager:
