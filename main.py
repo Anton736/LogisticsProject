@@ -9,8 +9,7 @@ from src.core.enums import WarehouseCostMode
 
 
 def main():
-    import ortools
-    print(ortools.__version__)
+
     try:
         # 1. Пути к файлам
         scenario_file   = os.path.join("data", "для логистики.xlsm")

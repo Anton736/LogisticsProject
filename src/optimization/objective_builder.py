@@ -71,7 +71,7 @@ class ObjectiveBuilder:
             cost_expr = cost_per_vol_scaled * wh_max_vol + fixed_cost_scaled
 
             self.model.add(warehouse_cost_var == cost_expr).OnlyEnforceIf(wh_active)
-            self.model.add(warehouse_cost_var == 0).OnlyEnforceIf(wh_active.Not)
+            self.model.add(warehouse_cost_var == 0).OnlyEnforceIf(wh_active.Not())
 
             total_cost_numerator_terms.append(warehouse_cost_var)
 
