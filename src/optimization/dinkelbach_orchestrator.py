@@ -40,7 +40,7 @@ class DinkelbachOrchestrator:
         Реализует алгоритм Динкельбаха для решения дробно-линейной оптимизации.
         Возвращает объект Solution, если найдено оптимальное решение.
         """
-        best_lambda = 0.0  # Начальное значение лямбда
+        best_lambda = 10.0  # Начальное значение лямбда
         best_solution_info: Optional[Dict[str, Any]] = None  # Храним информацию о лучшем решении
 
         # Масштабирующий фактор для лямбды, чтобы она была int при умножении на denominator_expr
@@ -69,6 +69,9 @@ class DinkelbachOrchestrator:
                 model, self.scenario, var_manager, scale_factor=self.objective_scale_factor
             )
             numerator_expr, denominator_expr = objective_builder.build_objective_expressions()
+
+            # ГАРАНТИЯ ДОСТАВКИ: Запрещаем алгоритму читерить и не доставлять ничего
+            model.add(denominator_expr >= 1)
 
             # Формируем целевую функцию для текущей итерации Динкельбаха: Minimize (Numerator - lambda * Denominator)
             # Все выражения уже масштабированы на `self.objective_scale_factor`.
