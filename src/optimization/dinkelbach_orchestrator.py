@@ -3,11 +3,11 @@ from ortools.sat.python import cp_model
 from typing import Optional, Dict, Any
 
 from src.core.entities import Scenario
-from var_manager import VarManager
-from pruner import RoutePruner
+from src.optimization.var_manager import VarManager
+from src.optimization.pruner import RoutePruner
 from src.models.demand import DemandManager
-from constraints import ConstraintFactory
-from objective_builder import ObjectiveBuilder
+from src.optimization.constraints import ConstraintFactory
+from src.optimization.objective_builder import ObjectiveBuilder
 from src.core.enums import WarehouseCostMode
 from src.models.solution import Solution  # Будет создан ниже
 from src.io.solution_presenter import SolutionPresenter  # Будет создан ниже
@@ -78,7 +78,7 @@ class DinkelbachOrchestrator:
             # Целевая функция: (Numerator * LAMBDA_SCALE_FACTOR) - (scaled_lambda_int * Denominator)
             # Обе части выражения теперь целочисленные
             objective_to_minimize = (numerator_expr * LAMBDA_SCALE_FACTOR) - (scaled_lambda_int * denominator_expr)
-            model.Minimize(objective_to_minimize)
+            model.minimize(objective_to_minimize)
 
             # Решаем модель
             status = self.solver.Solve(model)
@@ -156,7 +156,7 @@ class DinkelbachOrchestrator:
                     print(
                         "Model became infeasible. This can happen if lambda is too high. Reverting to previous best solution.py.")
                     break
-            elif status == cp_model.ABORTED:
+            elif status == cp_model.UNKNOWN:
                 print(f"Dinkelbach Iteration {iteration + 1}: Model ABORTED (e.g., timeout or user interrupt).")
                 break
             else:

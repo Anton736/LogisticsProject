@@ -28,6 +28,10 @@ class ExcelMapping:
     col_price_per_unit: str = "средняя цена за единицу продукции"
     col_units_in_crate: str = "кол-во ед. в ящике"
 
+    # Поля для склада в справочнике
+    label_wh_storage_cost: str = "Стоимость хранения"
+    label_wh_fixed_cost: str = "Фикс. затраты склада"
+
     # Параметры авто (если решим добавить в Excel)
     col_veh_capacity: str = "вместимость_ящиков"
     col_veh_count: str = "колво_машин"

@@ -1,5 +1,5 @@
 from datetime import time
-from typing import Any, Tuple, Optional
+from typing import Any, Tuple
 import pandas as pd
 import logging
 
@@ -7,15 +7,19 @@ class TimeParser:
     """Логика для времени и длительности"""
     @staticmethod
     def to_minutes(value: Any) -> int:
+        if pd.isna(value): return 0
         if isinstance(value, time):
             return value.hour * 60 + value.minute
+        if isinstance(value, (int, float)): # Если время пришло как доля суток (Excel формат)
+            return int(value * 1440)
         if isinstance(value, str) and ":" in value:
             try:
-                h, m = map(int, value.strip().split(':'))
+                parts = value.strip().split(':')
+                h = int(parts[0])
+                m = int(parts[1]) if len(parts) > 1 else 0
                 return h * 60 + m
-            except ValueError as e:
-                logging.error(f"Ошибка формата времени в строке '{value}': {e}")
-            raise
+            except (ValueError, IndexError):
+                logging.warning(f"Некорректный формат времени: '{value}'. Возвращаем 0.")
         return 0
 
 class CoordinateParser:
@@ -51,28 +55,27 @@ class NumericParser:
     """Очистка и конвертация чисел из грязных строк Excel"""
     @staticmethod
     def to_int(value: Any, default: int = 0) -> int:
-        if pd.isna(value):
+        if pd.isna(value) or value == '': return default
+        try:
+            # Сначала в float, потом в int (обработка "123.0")
+            return int(float(value))
+        except (ValueError, TypeError):
+            # Если это строка с мусором, пробуем вытащить число
+            if isinstance(value, str):
+                cleaned = ''.join(c for c in value if c.isdigit() or c == '.' or c == ',')
+                try:
+                    return int(float(cleaned.replace(',', '.')))
+                except: pass
+            logging.warning(f"Не удалось преобразовать в int: {value}")
             return default
-        if isinstance(value, (int, float)):
-            return int(value)
-        if isinstance(value, str):
-            # Убираем все, кроме цифр
-            cleaned = ''.join(filter(str.isdigit, value))
-            return int(cleaned) if cleaned else default
-        return default
 
     @staticmethod
     def to_float(value: Any, default: float = 0.0) -> float:
-        if pd.isna(value):
-            return default
-        if isinstance(value, (int, float)):
+        if pd.isna(value) or value == '': return default
+        try:
+            if isinstance(value, str):
+                value = value.replace(',', '.').strip()
             return float(value)
-        if isinstance(value, str):
-            # Оставляем цифры, точки и запятые (заменяя их на точки)
-            cleaned = value.replace(',', '.').strip()
-            cleaned = ''.join(c for c in cleaned if c.isdigit() or c == '.')
-            try:
-                return float(cleaned)
-            except ValueError:
-                return default
-        return default
+        except (ValueError, TypeError):
+            logging.warning(f"Не удалось преобразовать в float: {value}")
+            return default

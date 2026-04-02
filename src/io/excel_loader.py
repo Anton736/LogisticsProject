@@ -1,81 +1,86 @@
+# START OF FILE src/io/excel_loader.py
 import pandas as pd
-from typing import List, Tuple
 from src.core.entities import Scenario, Store, Warehouse, Vehicle, Brand, TransportNetwork
 from src.io.base_loader import BaseDataLoader
+from src.io.base_matrix_loader import BaseMatrixLoader
 from src.io.excel_mapping import ExcelMapping
-from src.io.parsers import TimeParser, CoordinateParser, RateExtractor, NumericParser
+from src.io.parsers import TimeParser, NumericParser, RateExtractor
 
 
 class LogisticsExcelLoader(BaseDataLoader):
-    def __init__(self, file_path: str, mapping: ExcelMapping):
+    """
+    Загружает сценарий логистики из Excel-файла.
+
+    Параметры:
+        file_path:      Путь к основному файлу сценария.
+        mapping:        Маппинг имён листов и столбцов.
+        matrix_loader:  Загрузчик матриц расстояний и времён.
+                        Если None — генерируется заглушка (только для разработки).
+    """
+
+    def __init__(
+        self,
+        file_path: str,
+        mapping: ExcelMapping,
+        matrix_loader: BaseMatrixLoader | None = None,
+    ):
         self.file_path = file_path
         self.map = mapping
+        self.matrix_loader = matrix_loader  # внедрение зависимости (DI)
 
     def load_scenario(self) -> Scenario:
-        # 1. Загрузка листов
         with pd.ExcelFile(self.file_path) as xls:
             df_work = pd.read_excel(xls, self.map.sheet_work)
             df_ref = pd.read_excel(xls, self.map.sheet_ref)
 
-        # Убираем полностью пустые строки, если они есть
         df_work = df_work.dropna(subset=[self.map.col_id])
-
-        # 2. Извлечение общих параметров из справочника (RateExtractor)
+        df_work = df_work[pd.to_numeric(df_work[self.map.col_id], errors='coerce').notna()]
         extractor = RateExtractor(df_ref, self.map)
-        driver_rate = extractor.get_float_value(self.map.label_driver_rate)
-        km_rate = extractor.get_float_value(self.map.label_km_rate)
-        hour_rate = extractor.get_float_value(self.map.label_hour_rate)
-
-        # Параметры продукции (пока для одного общего бренда)
-        price_unit = extractor.get_float_value(self.map.col_price_per_unit)
-        units_in_crate = extractor.get_float_value(self.map.col_units_in_crate)
 
         main_brand = Brand(id="B1", name="Общая продукция")
 
-        # 3. Парсинг Магазинов (Stores)
+        # 1. Магазины
         stores = []
         for _, row in df_work.iterrows():
-            # Потребность в ящиках (Demand)
             crates_plan = NumericParser.to_int(row.get(self.map.col_demand_crates))
-            store_demands = {
-                main_brand.id: {1440: crates_plan}  # 1440 - конец суток
-            }
-
-            store = Store(
+            stores.append(Store(
                 id=NumericParser.to_int(row[self.map.col_id]),
                 name=str(row[self.map.col_name]),
                 time_start=TimeParser.to_minutes(row[self.map.col_window_from]),
                 time_end=TimeParser.to_minutes(row[self.map.col_window_to]),
-                demands=store_demands
-            )
-            # Дополнительно можем сохранить координаты в атрибут, если расширим класс Store
-            # coords = CoordinateParser.parse(row[self.map.col_coords])
-            stores.append(store)
+                demands={main_brand.id: {1440: crates_plan}},
+            ))
 
-        # 4. Создание Завода (Warehouse)
-        # Пока завод один и его нет в таблице, создаем его вручную
-        # (в будущем можно добавить поиск координат завода в Excel)
+        # 2. Склад
         factory = Warehouse(
-            id=0,
-            name="Главный Завод",
-            cost_per_volume=0.0,  # Обычно на заводе хранение не считаем
-            fixed_staff_cost=0.0,
-            unloading_speed=10.0,  # Быстрая погрузка на заводе
+            id=0, name="Главный Склад",
+            cost_per_volume=extractor.get_float_value("Стоимость хранения"),
+            fixed_staff_cost=extractor.get_float_value("Фикс. затраты склада"),
+            handling_speed=extractor.get_float_value("Скорость погрузки") or 50.0,
             produced_brands=[main_brand.id],
-            initial_stock={main_brand.id: 999999},  # Бесконечный запас
-            is_factory=True
+            initial_stock={main_brand.id: 1_000_000},
+            is_factory=True,
         )
 
-        # 5. Транспорт (Vehicles)
-        # Создаем парк машин (например, 10 одинаковых машин на основе ставок из Excel)
-        vehicles = self._create_vehicles(driver_rate, km_rate, hour_rate)
+        # 3. Транспорт
+        dr = extractor.get_float_value(self.map.label_driver_rate)
+        km = extractor.get_float_value(self.map.label_km_rate)
+        hr = extractor.get_float_value(self.map.label_hour_rate)
+        cap = NumericParser.to_int(extractor.get_float_value(self.map.col_veh_capacity), default=500)
+        count = NumericParser.to_int(extractor.get_float_value(self.map.col_veh_count), default=10)
 
-        # 6. Сеть (Network)
-        # Пока матриц нет, создаем пустую (заглушку)
-        total_locs = len(stores) + 1  # +1 для завода
-        network = TransportNetwork(
-            distance_matrix=[[0.0] * total_locs for _ in range(total_locs)],
-            time_matrix=[[0] * total_locs for _ in range(total_locs)]
+        vehicles = [
+            Vehicle(id=i, category="Стандарт", cost_call=dr,
+                    cost_km=km, cost_hour=hr, capacity=cap, unloading_speed=1.0)
+            for i in range(1, count + 1)
+        ]
+
+        # 4. Транспортная сеть
+        all_locs_count = len(stores) + 1  # +1 склад
+        network = (
+            self.matrix_loader.load_network()
+            if self.matrix_loader is not None
+            else self._generate_network_stub(all_locs_count)
         )
 
         return Scenario(
@@ -83,12 +88,23 @@ class LogisticsExcelLoader(BaseDataLoader):
             stores=stores,
             warehouses=[factory],
             brands=[main_brand],
-            network=network
+            network=network,
+            bread_unit_cost=extractor.get_float_value(self.map.col_price_per_unit) or 1.0,
         )
 
-    def _create_vehicles(self, dr, km, hr) -> List[Vehicle]:
-        # В идеале эти числа (10, 500) тоже должны быть в Excel или внешнем config.yaml
-        count = 10
-        cap = 500
-        return [Vehicle(id=i, cost_call=dr, cost_km=km, cost_hour=hr, capacity=cap, unloading_speed=1.0)
-                for i in range(1, count + 1)]
+    # ------------------------------------------------------------------
+    # Заглушка — используется только при matrix_loader=None
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _generate_network_stub(size: int) -> TransportNetwork:
+        """Временная заглушка: 10 км и 20 мин между любыми точками."""
+        import numpy as np
+        dist = np.full((size, size), 10.0)
+        np.fill_diagonal(dist, 0)
+        time_ = np.full((size, size), 20)
+        np.fill_diagonal(time_, 0)
+        return TransportNetwork(
+            distance_matrix=dist.tolist(),
+            time_matrix=time_.tolist(),
+        )

@@ -3,8 +3,8 @@
 from ortools.sat.python import cp_model
 from typing import Optional
 
-from pruner import RoutePruner
-from src.core.entities import Scenario, Store, Warehouse
+from src.optimization.pruner import RoutePruner
+from src.core.entities import Scenario
 
 
 class VarManager:
@@ -51,52 +51,52 @@ class VarManager:
         allowed_pairs = self.pruner.get_allowed_pairs()
 
         for v in self.scenario.vehicles:
-            self.vehicle_used[v.id] = self.model.NewBoolVar(f'used_v{v.id}')
-            self.total_dist[v.id] = self.model.NewIntVar(0, 1_000_000, f'dist_v{v.id}')
-            self.total_time[v.id] = self.model.NewIntVar(0, 1440, f'total_t_v{v.id}')
-            self.shift_start[v.id] = self.model.NewIntVar(0, 1440, f'start_v{v.id}')
-            self.shift_end[v.id] = self.model.NewIntVar(0, 1440, f'end_v{v.id}')
+            self.vehicle_used[v.id] = self.model.new_bool_var(f'used_v{v.id}')
+            self.total_dist[v.id] = self.model.new_int_var(0, 1_000_000, f'dist_v{v.id}')
+            self.total_time[v.id] = self.model.new_int_var(0, 1440, f'total_t_v{v.id}')
+            self.shift_start[v.id] = self.model.new_int_var(0, 1440, f'start_v{v.id}')
+            self.shift_end[v.id] = self.model.new_int_var(0, 1440, f'end_v{v.id}')
 
             for loc in self.scenario.all_locations:
-                self.arrival_times[(v.id, loc.id)] = self.model.NewIntVar(0, 1440, f'arr_v{v.id}_l{loc.id}')
-                self.load_at_point[(v.id, loc.id)] = self.model.NewIntVar(0, v.capacity, f'load_out_v{v.id}_l{loc.id}')
+                self.arrival_times[(v.id, loc.id)] = self.model.new_int_var(0, 1440, f'arr_v{v.id}_l{loc.id}')
+                self.load_at_point[(v.id, loc.id)] = self.model.new_int_var(0, v.capacity, f'load_out_v{v.id}_l{loc.id}')
 
                 for b in self.scenario.brands:
-                    self.delivered_vol[(v.id, loc.id, b.id)] = self.model.NewIntVar(0, v.capacity, f'del_v{v.id}_l{loc.id}_b{b.id}')
-                    self.pickup_vol[(v.id, loc.id, b.id)] = self.model.NewIntVar(0, v.capacity, f'pick_v{v.id}_l{loc.id}_b{b.id}')
+                    self.delivered_vol[(v.id, loc.id, b.id)] = self.model.new_int_var(0, v.capacity, f'del_v{v.id}_l{loc.id}_b{b.id}')
+                    self.pickup_vol[(v.id, loc.id, b.id)] = self.model.new_int_var(0, v.capacity, f'pick_v{v.id}_l{loc.id}_b{b.id}')
 
             for i_id, j_id in allowed_pairs:
-                self.x[(v.id, i_id, j_id)] = self.model.NewBoolVar(f'x_v{v.id}_{i_id}_{j_id}')
+                self.x[(v.id, i_id, j_id)] = self.model.new_bool_var(f'x_v{v.id}_{i_id}_{j_id}')
 
         for wh in self.scenario.warehouses:
-            self.wh_active[wh.id] = self.model.NewBoolVar(f'wh_active_{wh.id}')
-            self.wh_max_vol[wh.id] = self.model.NewIntVar(0, 10_000_000, f'wh_max_flow_w{wh.id}')
+            self.wh_active[wh.id] = self.model.new_bool_var(f'wh_active_{wh.id}')
+            self.wh_max_vol[wh.id] = self.model.new_int_var(0, 10_000_000, f'wh_max_flow_w{wh.id}')
 
             for v in self.scenario.vehicles:
                 # Один интервал на визит машины v на склад wh.
                 # Он будет активен, если машина посещает склад.
-                self.wh_visit_active_flags[(wh.id, v.id)] = self.model.NewBoolVar(f'wh_visit_active_w{wh.id}_v{v.id}')
-                self.wh_visit_intervals[(wh.id, v.id)] = self.model.NewOptionalIntervalVar(
-                    self.model.NewIntVar(0, 1440, f'wh_int_start_w{wh.id}_v{v.id}'), # start
-                    self.model.NewIntVar(0, 1440, f'wh_int_dur_w{wh.id}_v{v.id}'),   # duration
-                    self.model.NewIntVar(0, 2880, f'wh_int_end_w{wh.id}_v{v.id}'),   # end
+                self.wh_visit_active_flags[(wh.id, v.id)] = self.model.new_bool_var(f'wh_visit_active_w{wh.id}_v{v.id}')
+                self.wh_visit_intervals[(wh.id, v.id)] = self.model.new_optional_interval_var(
+                    self.model.new_int_var(0, 1440, f'wh_int_start_w{wh.id}_v{v.id}'), # start
+                    self.model.new_int_var(0, 1440, f'wh_int_dur_w{wh.id}_v{v.id}'),   # duration
+                    self.model.new_int_var(0, 2880, f'wh_int_end_w{wh.id}_v{v.id}'),   # end
                     self.wh_visit_active_flags[(wh.id, v.id)],                      # is_present
                     f'wh_visit_int_w{wh.id}_v{v.id}'
                 )
 
                 for b in self.scenario.brands:
                     # Изменение запаса для бренда B на складе WH, вызванное визитом машины V
-                    self.wh_stock_change_per_visit[(wh.id, b.id, v.id)] = self.model.NewIntVar(
+                    self.wh_stock_change_per_visit[(wh.id, b.id, v.id)] = self.model.new_int_var(
                         -v.capacity, v.capacity, f'stock_change_w{wh.id}_b{b.id}_v{v.id}'
                     )
 
     def add_load_arriving_vars(self):
         for v in self.scenario.vehicles:
             for loc in self.scenario.all_locations:
-                self.load_arriving[(v.id, loc.id)] = self.model.NewIntVar(0, v.capacity, f"load_arr_v{v.id}_l{loc.id}")
+                self.load_arriving[(v.id, loc.id)] = self.model.new_int_var(0, v.capacity, f"load_arr_v{v.id}_l{loc.id}")
 
     # --- Геттеры ---
-    def get_routing_var(self, v_id: int, i: int, j: int) -> Optional[cp_model.BoolVar]:
+    def get_routing_var(self, v_id: int, i: int, j: int) -> Optional[cp_model.BoolVarT]:
         return self.x.get((v_id, i, j))
     def get_arrival_var(self, v_id: int, loc_id: int) -> cp_model.IntVar:
         return self.arrival_times[(v_id, loc_id)]
@@ -108,7 +108,7 @@ class VarManager:
         return self.delivered_vol[(v_id, loc_id, brand_id)]
     def get_pickup_var(self, v_id: int, loc_id: int, brand_id: str) -> cp_model.IntVar:
         return self.pickup_vol[(v_id, loc_id, brand_id)]
-    def get_wh_active_var(self, wh_id: int) -> cp_model.BoolVar:
+    def get_wh_active_var(self, wh_id: int) -> cp_model.BoolVarT:
         return self.wh_active[wh_id]
     def get_wh_max_vol_var(self, wh_id: int) -> cp_model.IntVar:
         return self.wh_max_vol[wh_id]
@@ -116,9 +116,9 @@ class VarManager:
         return self.wh_stock_change_per_visit[(wh_id, brand_id, v_id)]
     def get_wh_visit_interval_var(self, wh_id: int, v_id: int) -> cp_model.IntervalVar:
         return self.wh_visit_intervals[(wh_id, v_id)]
-    def get_wh_visit_active_flag(self, wh_id: int, v_id: int) -> cp_model.BoolVar:
+    def get_wh_visit_active_flag(self, wh_id: int, v_id: int) -> cp_model.BoolVarT:
         return self.wh_visit_active_flags[(wh_id, v_id)]
-    def get_vehicle_used_var(self, v_id: int) -> cp_model.BoolVar:
+    def get_vehicle_used_var(self, v_id: int) -> cp_model.BoolVarT:
         return self.vehicle_used[v_id]
     def get_total_dist_var(self, v_id: int) -> cp_model.IntVar:
         return self.total_dist[v_id]
