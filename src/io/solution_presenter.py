@@ -1,12 +1,12 @@
 from typing import List, Dict
-from src.core.entities import Scenario, Vehicle, Location, VehicleAssignment, WarehouseAssignment
+from src.core.entities import Scenario, Vehicle, Location, VehicleAssignment, WarehouseAssignment, RouteStep
 from src.models.solution import Solution
 
 
 class SolutionPresenter:
     def __init__(self, scenario: Scenario):
         self.scenario = scenario
-        self.location_by_id: Dict[int, Location] = {loc.id: loc for loc in scenario.all_locations}
+        self.location_by_id: Dict[str, Location] = {loc.id: loc for loc in scenario.all_locations}
 
     def build_solution(self, solver, var_manager, optimal_lambda,
                        numerator_value_scaled, denominator_value_scaled,
@@ -49,41 +49,71 @@ class SolutionPresenter:
             total_denominator_value=denominator_value_scaled / objective_scale_factor
         )
 
-    def _reconstruct_route(self, solver, var_manager, vehicle: Vehicle) -> List[Location]:
-        route = []
-        # Находим склад отправления
-        curr_loc_id = -1
+    def _reconstruct_route(self, solver, var_manager, vehicle: Vehicle) -> List[RouteStep]:
+
+        route_steps = []
+        curr_loc_id = ""
+
+        # 1. Находим склад отправления
         for wh in self.scenario.warehouses:
             for j_loc in self.scenario.all_locations:
                 x_var = var_manager.get_routing_var(vehicle.id, wh.id, j_loc.id)
-                if x_var and solver.BooleanValue(x_var):
+                if x_var is not None and solver.BooleanValue(x_var):
                     curr_loc_id = wh.id
                     break
-            if curr_loc_id != -1: break
+            if curr_loc_id != "": break
 
-        if curr_loc_id == -1: return []
+        if curr_loc_id == "": return []
 
         visited_ids = set()
         max_len = len(self.scenario.all_locations) + 1
 
+        # ДОБАВЛЯЕМ СТАРТОВЫЙ СКЛАД (Начало пути)
+        route_steps.append(RouteStep(
+            location=self.location_by_id[curr_loc_id],
+            distance_from_prev=0.0,
+            time_from_prev=0,
+            delivered_volume=0,
+            service_time=0
+        ))
+
         for _ in range(max_len):
-            if curr_loc_id in visited_ids and curr_loc_id in [w.id for w in self.scenario.warehouses]:
-                # Дошли до склада повторно (завершили маршрут)
-                route.append(self.location_by_id[curr_loc_id])
-                break
-
             visited_ids.add(curr_loc_id)
-            route.append(self.location_by_id[curr_loc_id])
 
-            next_loc_id = -1
+            next_loc_id = ""
             for j_loc in self.scenario.all_locations:
                 if j_loc.id == curr_loc_id: continue
                 x_var = var_manager.get_routing_var(vehicle.id, curr_loc_id, j_loc.id)
-                if x_var and solver.BooleanValue(x_var):
+                if x_var is not None and solver.BooleanValue(x_var):
                     next_loc_id = j_loc.id
                     break
 
-            if next_loc_id == -1: break  # Тупик
+            if next_loc_id == "": break  # Тупик
+
+            # Вытаскиваем данные перехода
+            dist = self.scenario.network.distance_matrix[curr_loc_id][next_loc_id]
+            time_ij = int(self.scenario.network.time_matrix[curr_loc_id][next_loc_id])
+
+            # Вытаскиваем объем доставки в эту точку
+            del_vol = 0
+            for b in self.scenario.brands:
+                del_var = var_manager.get_delivery_var(vehicle.id, next_loc_id, b.id)
+                del_vol += solver.Value(del_var)
+
+            # Вычисляем время обслуживания
+            service_time = int(del_vol / vehicle.unloading_speed) if vehicle.unloading_speed > 0 else 0
+
+            route_steps.append(RouteStep(
+                location=self.location_by_id[next_loc_id],
+                distance_from_prev=dist,
+                time_from_prev=time_ij,
+                delivered_volume=del_vol,
+                service_time=service_time
+            ))
+
             curr_loc_id = next_loc_id
 
-        return route
+            if curr_loc_id in [w.id for w in self.scenario.warehouses]:
+                break
+
+        return route_steps

@@ -33,41 +33,65 @@ class LogisticsExcelLoader(BaseDataLoader):
             df_work = pd.read_excel(xls, self.map.sheet_work)
             df_ref = pd.read_excel(xls, self.map.sheet_ref)
 
-        df_work = df_work.dropna(subset=[self.map.col_id])
-        df_work = df_work[pd.to_numeric(df_work[self.map.col_id], errors='coerce').notna()]
-        extractor = RateExtractor(df_ref, self.map)
+            # Фильтруем пустые строки по столбцу "Код" (col_code)
+            df_work = df_work.dropna(subset=[self.map.col_code])
+            extractor = RateExtractor(df_ref, self.map)
 
-        main_brand = Brand(id="B1", name="Общая продукция")
+            main_brand = Brand(id="B1", name="Общая продукция")
 
-        # 1. Магазины
-        stores = []
-        for _, row in df_work.iterrows():
-            crates_plan = NumericParser.to_int(row.get(self.map.col_demand_crates))
-            stores.append(Store(
-                id=NumericParser.to_int(row[self.map.col_id]),
-                name=str(row[self.map.col_name]),
-                time_start=TimeParser.to_minutes(row[self.map.col_window_from]),
-                time_end=TimeParser.to_minutes(row[self.map.col_window_to]),
-                demands={main_brand.id: {1440: crates_plan}},
-            ))
+            # 1. Магазины
+            stores = []
+            for _, row in df_work.iterrows():
+                crates_plan = NumericParser.to_int(row.get(self.map.col_demand_crates))
 
-        # 2. Склад
-        factory = Warehouse(
-            id=0, name="Главный Склад",
-            cost_per_volume=extractor.get_float_value("Стоимость хранения"),
-            fixed_staff_cost=extractor.get_float_value("Фикс. затраты склада"),
-            handling_speed=extractor.get_float_value("Скорость погрузки") or 50.0,
-            produced_brands=[main_brand.id],
-            initial_stock={main_brand.id: 1_000_000},
-            is_factory=True,
-        )
+                raw_service_time = row.get(self.map.col_unloading_time)
+                service_minutes = TimeParser.to_minutes(raw_service_time)
+
+                # Если в ячейке пусто или 0, поставим какой-то разумный минимум (например, 3 мин)
+                if service_minutes == 0:
+                    service_minutes = 3
+
+                raw_code = str(row.get(self.map.col_code, "")).strip()
+                if raw_code.endswith(".0"):
+                    raw_code = raw_code[:-2]
+
+                t_end = TimeParser.to_minutes(row[self.map.col_window_to])
+                if t_end == 0: t_end = 1440
+
+                stores.append(Store(
+                    id=raw_code,
+                    name=str(row[self.map.col_name]),
+                    time_start=TimeParser.to_minutes(row[self.map.col_window_from]),
+                    time_end=t_end,
+                    service_time=service_minutes,  # Передаем в объект
+                    demands={main_brand.id: {1440: crates_plan}},
+                ))
+
+            # 2. Склад (ID теперь строка "0", как в первой строке твоей матрицы)
+            factory = Warehouse(
+                id="0", name="Главный Склад",
+                cost_per_volume=extractor.get_float_value(self.map.label_wh_storage_cost) or 0.0,
+                fixed_staff_cost=extractor.get_float_value(self.map.label_wh_fixed_cost) or 0.0,
+                handling_speed=50.0,
+                produced_brands=[main_brand.id],
+                initial_stock={main_brand.id: 1_000_000},
+                is_factory=True,
+            )
 
         # 3. Транспорт
         dr = extractor.get_float_value(self.map.label_driver_rate)
         km = extractor.get_float_value(self.map.label_km_rate)
         hr = extractor.get_float_value(self.map.label_hour_rate)
-        cap = NumericParser.to_int(extractor.get_float_value(self.map.col_veh_capacity), default=500)
-        count = NumericParser.to_int(extractor.get_float_value(self.map.col_veh_count), default=10)
+
+        # Безопасное чтение вместимости и количества
+        raw_cap = extractor.get_float_value(self.map.col_veh_capacity)
+        cap = int(raw_cap) if raw_cap > 0 else 500
+
+        raw_count = extractor.get_float_value(self.map.col_veh_count)
+        count = int(raw_count) if raw_count > 0 else 50
+
+        # Выведем в консоль, чтобы ты видел, что прочитал скрипт
+        print(f"  [Транспорт] Ставка: {dr}₽, Км: {km}₽, Час: {hr}₽. Создаем {count} машин по {cap} ящиков.")
 
         vehicles = [
             Vehicle(id=i, category="Стандарт", cost_call=dr,
@@ -96,15 +120,28 @@ class LogisticsExcelLoader(BaseDataLoader):
     # Заглушка — используется только при matrix_loader=None
     # ------------------------------------------------------------------
 
+
     @staticmethod
     def _generate_network_stub(size: int) -> TransportNetwork:
         """Временная заглушка: 10 км и 20 мин между любыми точками."""
-        import numpy as np
-        dist = np.full((size, size), 10.0)
-        np.fill_diagonal(dist, 0)
-        time_ = np.full((size, size), 20)
-        np.fill_diagonal(time_, 0)
+        distance_matrix = {}
+        time_matrix = {}
+
+        # Генерируем ключи в виде строк: "0", "1", "2"...
+        loc_ids = [str(i) for i in range(size)]
+
+        for i in loc_ids:
+            distance_matrix[i] = {}
+            time_matrix[i] = {}
+            for j in loc_ids:
+                if i == j:
+                    distance_matrix[i][j] = 0.0
+                    time_matrix[i][j] = 0
+                else:
+                    distance_matrix[i][j] = 10.0
+                    time_matrix[i][j] = 20
+
         return TransportNetwork(
-            distance_matrix=dist.tolist(),
-            time_matrix=time_.tolist(),
+            distance_matrix=distance_matrix,
+            time_matrix=time_matrix,
         )

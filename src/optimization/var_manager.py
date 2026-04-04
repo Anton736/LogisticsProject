@@ -96,35 +96,50 @@ class VarManager:
                 self.load_arriving[(v.id, loc.id)] = self.model.new_int_var(0, v.capacity, f"load_arr_v{v.id}_l{loc.id}")
 
     # --- Геттеры ---
-    def get_routing_var(self, v_id: int, i: int, j: int) -> Optional[cp_model.BoolVarT]:
+    def get_routing_var(self, v_id: int, i: str, j: str) -> Optional[cp_model.BoolVarT]:
         return self.x.get((v_id, i, j))
-    def get_arrival_var(self, v_id: int, loc_id: int) -> cp_model.IntVar:
+
+    def get_arrival_var(self, v_id: int, loc_id: str) -> cp_model.IntVar:
         return self.arrival_times[(v_id, loc_id)]
-    def get_load_arriving_var(self, v_id: int, loc_id: int) -> cp_model.IntVar:
+
+    def get_load_arriving_var(self, v_id: int, loc_id: str) -> cp_model.IntVar:
         return self.load_arriving[(v_id, loc_id)]
-    def get_load_at_point_var(self, v_id: int, loc_id: int) -> cp_model.IntVar:
+
+    def get_load_at_point_var(self, v_id: int, loc_id: str) -> cp_model.IntVar:
         return self.load_at_point[(v_id, loc_id)]
-    def get_delivery_var(self, v_id: int, loc_id: int, brand_id: str) -> cp_model.IntVar:
+
+    def get_delivery_var(self, v_id: int, loc_id: str, brand_id: str) -> cp_model.IntVar:
         return self.delivered_vol[(v_id, loc_id, brand_id)]
-    def get_pickup_var(self, v_id: int, loc_id: int, brand_id: str) -> cp_model.IntVar:
+
+    def get_pickup_var(self, v_id: int, loc_id: str, brand_id: str) -> cp_model.IntVar:
         return self.pickup_vol[(v_id, loc_id, brand_id)]
-    def get_wh_active_var(self, wh_id: int) -> cp_model.BoolVarT:
+
+    def get_wh_active_var(self, wh_id: str) -> cp_model.BoolVarT:
         return self.wh_active[wh_id]
-    def get_wh_max_vol_var(self, wh_id: int) -> cp_model.IntVar:
+
+    def get_wh_max_vol_var(self, wh_id: str) -> cp_model.IntVar:
         return self.wh_max_vol[wh_id]
-    def get_wh_stock_change_per_visit_var(self, wh_id: int, brand_id: str, v_id: int) -> cp_model.IntVar:
+
+    def get_wh_stock_change_per_visit_var(self, wh_id: str, brand_id: str, v_id: int) -> cp_model.IntVar:
         return self.wh_stock_change_per_visit[(wh_id, brand_id, v_id)]
-    def get_wh_visit_interval_var(self, wh_id: int, v_id: int) -> cp_model.IntervalVar:
+
+    def get_wh_visit_interval_var(self, wh_id: str, v_id: int) -> cp_model.IntervalVar:
         return self.wh_visit_intervals[(wh_id, v_id)]
-    def get_wh_visit_active_flag(self, wh_id: int, v_id: int) -> cp_model.BoolVarT:
+
+    def get_wh_visit_active_flag(self, wh_id: str, v_id: int) -> cp_model.BoolVarT:
         return self.wh_visit_active_flags[(wh_id, v_id)]
+
     def get_vehicle_used_var(self, v_id: int) -> cp_model.BoolVarT:
         return self.vehicle_used[v_id]
+
     def get_total_dist_var(self, v_id: int) -> cp_model.IntVar:
         return self.total_dist[v_id]
+
     def get_total_time_var(self, v_id: int) -> cp_model.IntVar:
         return self.total_time[v_id]
+
     def get_shift_start_var(self, v_id: int) -> cp_model.IntVar:
         return self.shift_start[v_id]
+
     def get_shift_end_var(self, v_id: int) -> cp_model.IntVar:
         return self.shift_end[v_id]

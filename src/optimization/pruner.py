@@ -52,14 +52,14 @@ class RoutePruner:
         self.min_time_radius = min_time_radius
         self.dc_pruning = dc_pruning if dc_pruning is not None else DcPruningConfig()
 
-        self._neighbor_cache: Dict[int, Set[int]] = self._build_adaptive_neighbor_cache()
-        self._pruned_factory_dc_pairs: Set[Tuple[int, int]] = self._compute_pruned_factory_dc_pairs()
+        self._neighbor_cache: Dict[str, Set[str]] = self._build_adaptive_neighbor_cache()
+        self._pruned_factory_dc_pairs: Set[Tuple[str, str]] = self._compute_pruned_factory_dc_pairs()
 
     # -----------------------------------------------------------------------
     # Публичный API
     # -----------------------------------------------------------------------
 
-    def get_allowed_pairs(self) -> List[Tuple[int, int]]:
+    def get_allowed_pairs(self) -> List[Tuple[str, str]]:
         """
         Возвращает допустимые дуги (from_id, to_id) после всех фильтров:
           1. Временная выполнимость.
@@ -98,9 +98,8 @@ class RoutePruner:
     # Обрезка Завод → РЦ
     # -----------------------------------------------------------------------
 
-    def _compute_pruned_factory_dc_pairs(self) -> Set[Tuple[int, int]]:
-        """Строит кэш обрезанных пар. Вызывается один раз в __init__."""
-        pruned: Set[Tuple[int, int]] = set()
+    def _compute_pruned_factory_dc_pairs(self) -> Set[Tuple[str, str]]:
+        pruned: Set[Tuple[str, str]] = set()
         if not self.dc_pruning.enabled:
             return pruned
 
@@ -191,7 +190,7 @@ class RoutePruner:
     # Адаптивная плотность для магазин→магазин
     # -----------------------------------------------------------------------
 
-    def _build_adaptive_neighbor_cache(self) -> Dict[int, Set[int]]:
+    def _build_adaptive_neighbor_cache(self) -> Dict[str, Set[str]]:
         cache = {}
         store_ids  = [s.id for s in self.scenario.stores]
         time_matrix = self.scenario.network.time_matrix

@@ -81,15 +81,15 @@ class ExcelMatrixLoader(BaseMatrixLoader):
         return matrix
 
     @staticmethod
-    def _normalize_id(value) -> int:
+    def _normalize_id(value) -> str:
         """
-        Приводит ID точки к int.
-        Если это невозможно (например, строковый код), оставляет как есть.
+        Приводит ID точки к строке (Коду).
+        Убирает лишние пробелы и '.0' на конце, если pandas прочитал код как число.
         """
-        try:
-            return int(float(value))
-        except (ValueError, TypeError):
-            return value
+        val_str = str(value).strip()
+        if val_str.endswith(".0"):
+            val_str = val_str[:-2]
+        return val_str
 
     @staticmethod
     def _safe_cast(value, target_type: type):

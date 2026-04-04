@@ -27,15 +27,22 @@ class Vehicle:
 
 @dataclass
 class Location:
-    id: int
+    id: str
     name: str
 
 
 @dataclass
+class RouteStep:
+    location: Location
+    distance_from_prev: float
+    time_from_prev: int
+    delivered_volume: int
+    service_time: int
+@dataclass
 class VehicleAssignment:
     """Класс для хранения РЕЗУЛЬТАТОВ решения для конкретной машины"""
     vehicle: Vehicle
-    route: List[Location]  # Список ID локаций
+    route: List[RouteStep]  # Список ID локаций
     total_time: float = 0.0  # k_it'' (время использования)
     total_dist: float = 0.0  # k_is'' (пройденный путь)
     is_active: bool = False  # w_I (используется ли вообще)
@@ -60,7 +67,7 @@ class Store(Location):
     demands: Dict[str, Dict[int, int]] = field(default_factory=dict)
     # n_iku: коэффициент разгрузки (куц_kn)
     unloading_coeff: float = 1.0
-
+    service_time: int = 5
 
 @dataclass
 class Warehouse(Location):
@@ -91,8 +98,8 @@ class WarehouseAssignment:
 @dataclass
 class TransportNetwork:
     # Матрицы m_isj и m_itj: [from_id][to_id]
-    distance_matrix: List[List[float]]
-    time_matrix: List[List[int]]
+    distance_matrix: Dict[str, Dict[str, float]]
+    time_matrix: Dict[str, Dict[str, float]]
 
 
 @dataclass
@@ -110,5 +117,5 @@ class Scenario:
         return self.warehouses + self.stores
 
     @property
-    def location_ids(self) -> List[int]:
+    def location_ids(self) -> List[str]:
         return [loc.id for loc in self.all_locations]

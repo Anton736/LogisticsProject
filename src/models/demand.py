@@ -14,7 +14,7 @@ class DemandManager:
         self.steps = sorted(steps, key=lambda x: x.time_limit)
 
     def get_segment_indicators(self, model: cp_model.CpModel, arrival_time: cp_model.IntVar,
-                               loc_id: int, v_id: int) -> List[cp_model.BoolVarT]:
+                               loc_id: str, v_id: int) -> List[cp_model.BoolVarT]:
         """
         СОЗДАЕТ СЕТКУ ВРЕМЕНИ (Вызывать 1 раз для пары Машина-Магазин).
         Определяет, в какой временной интервал попала машина.
@@ -33,7 +33,7 @@ class DemandManager:
         return segments
 
     def apply_demand_limit(self, model: cp_model.CpModel, segments: List[cp_model.BoolVarT],
-                           base_demand: int, brand_id: str, store_id: int) -> cp_model.IntVar:
+                           base_demand: int, brand_id: str, store_id: str) -> cp_model.IntVar:
         """
         ПРИМЕНЯЕТ ЛИМИТ (Вызывать для каждого бренда).
         Использует готовую сетку сегментов, чтобы выставить ограничение.

@@ -5,7 +5,7 @@ class ExcelMapping:
     # Лист "рабочее окно"
     sheet_work: str = "рабочее окно"
     col_id: str = "№"
-    col_code: str = "код"
+    col_code: str = "Код"
     col_name: str = "название тт"
     col_address: str = "адрес тт"
     col_coords: str = "координаты+"
@@ -21,8 +21,8 @@ class ExcelMapping:
     col_ref_channel: str = "канал сбыта"
     # Метки для футера (ставок)
     label_driver_rate: str = "Ставка водителя"
-    label_km_rate: str = "стоимость на 1 км"
-    label_hour_rate: str = "стоимость на 1 час"
+    label_km_rate: str = "стоимость 1 км"
+    label_hour_rate: str = "стоимость 1 час"
 
     # Справочник
     col_price_per_unit: str = "средняя цена за единицу продукции"

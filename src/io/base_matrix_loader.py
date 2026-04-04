@@ -32,25 +32,35 @@ class BaseMatrixLoader(ABC):
         """
 
     def load_network(self) -> TransportNetwork:
-        """
-        Удобный фасадный метод: загружает обе матрицы
-        и собирает готовый TransportNetwork.
-
-        Переопределяй только если нужна нетривиальная логика сборки.
-        """
         raw_dist = self.load_distance_matrix()
         raw_time = self.load_time_matrix()
 
-        location_ids = sorted(raw_dist.keys())
+        location_ids = list(raw_dist.keys())
 
-        distance_matrix = [
-            [raw_dist[i].get(j, 0.0) for j in location_ids]
-            for i in location_ids
-        ]
-        time_matrix = [
-            [raw_time[i].get(j, 0) for j in location_ids]
-            for i in location_ids
-        ]
+        distance_matrix = {}
+        time_matrix = {}
+
+        for i in location_ids:
+            distance_matrix[i] = {}
+            time_matrix[i] = {}
+            for j in location_ids:
+                # Читаем базовые значения (если нет, ставим 0)
+                dist = raw_dist[i].get(j, 0.0)
+                base_time = raw_time[i].get(j, 0)
+
+                # ЛОГИКА РАЗГОНА И ТОРМОЖЕНИЯ
+                if i == j:
+                    # Машина никуда не едет (сама к себе), время 0
+                    final_time = 0
+                else:
+                    # dist измеряется в км. 50 метров = 0.05 км
+                    if dist <= 0.05:
+                        final_time = base_time + 2
+                    else:
+                        final_time = base_time + 5
+
+                distance_matrix[i][j] = dist
+                time_matrix[i][j] = final_time
 
         return TransportNetwork(
             distance_matrix=distance_matrix,

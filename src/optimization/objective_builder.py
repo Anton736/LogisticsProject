@@ -1,7 +1,7 @@
 # START OF FILE objective_builder.py
 from ortools.sat.python import cp_model
-from typing import Tuple
 
+from typing import Tuple, Any
 from src.core.entities import Scenario  # Добавляем Warehouse для явного использования
 from src.optimization.var_manager import VarManager
 
@@ -18,7 +18,7 @@ class ObjectiveBuilder:
         """Вспомогательная функция для масштабирования float в int."""
         return int(value * self.scale_factor)
 
-    def build_objective_expressions(self) -> Tuple[cp_model.LinearExpr, cp_model.LinearExpr]:
+    def build_objective_expressions(self) -> Tuple[Any, Any]:
         """
         Строит выражения для числителя и знаменателя с реалистичными границами int64.
         """

@@ -25,7 +25,7 @@ class Solution:
         if active_vehicles:
             for va in active_vehicles:
                 print(f"Vehicle {va.vehicle.id} (Category: {va.vehicle.category}):")
-                route_names = [f"{loc.name} (ID: {loc.id})" for loc in va.route] if va.route else ["No route"]
+                route_names = [f"{loc.location.name} (ID: {loc.location.id})" for loc in va.route] if va.route else ["No route"]
                 print(f"  Route: {' -> '.join(route_names)}")
                 print(f"  Total Distance: {va.total_dist:,.2f} km")
                 print(f"  Total Time: {va.total_time:,.2f} min")
