@@ -6,21 +6,20 @@ from src.models.demand import DemandManager, DemandStep
 from src.optimization.pruner import RoutePruner
 from src.optimization.dinkelbach_orchestrator import DinkelbachOrchestrator
 from src.core.enums import WarehouseCostMode
-
+from src.io.excel_exporter import LogisticsExcelExporter
 
 def main():
-
     try:
         # 1. Пути к файлам
         scenario_file   = os.path.join("data", "для логистики.xlsm")
-        distances_file  = os.path.join("data", "расстояния.xlsx")
-        times_file      = os.path.join("data", "время.xlsx")
+        distances_file  = os.path.join("data", "matrix_distance_km.xlsx")
+        times_file      = os.path.join("data", "matrix_time_minutes.xlsx")
 
-        # 2. Загрузчик матриц (внешняя зависимость, легко заменить на другой источник)
+        # 2. Загрузчик матриц
         matrix_loader = ExcelMatrixLoader(
             distance_file=distances_file,
             time_file=times_file,
-            distance_sheet=0,   # первый лист
+            distance_sheet=0,
             time_sheet=0,
         )
 
@@ -30,6 +29,31 @@ def main():
 
         print("Шаг 1: Загрузка сценария из Excel...")
         scenario = loader.load_scenario()
+
+        # =========================================================
+        # НОВЫЙ БЛОК: ПРОВЕРКА ЗАГРУЖЕННЫХ ДАННЫХ
+        # =========================================================
+        print("\n--- Отчет о загрузке данных ---")
+        print(f"Магазинов (Stores): {len(scenario.stores)}")
+        print(f"Складов (Warehouses): {len(scenario.warehouses)}")
+        print(f"Машин (Vehicles): {len(scenario.vehicles)}")
+        total_demand = sum(store.demands["B1"][1440] for store in scenario.stores)
+        total_capacity = sum(v.capacity for v in scenario.vehicles)
+        print(f"Общий заказ: {total_demand} ящиков. Вместимость автопарка: {total_capacity} ящиков.")
+        print("-------------------------------\n")
+
+        if len(scenario.stores) == 0:
+            print("[СТОП] Загружено 0 магазинов. Оптимизация невозможна.")
+            print("Возможные причины:")
+            print(" 1. В Excel столбец называется не '№' (возможно есть невидимый пробел).")
+            print(" 2. В столбце '№' нет чисел (только текст), фильтр их удалил.")
+            return
+
+        if len(scenario.vehicles) == 0:
+            print("[СТОП] Загружено 0 машин. Оптимизация невозможна.")
+            print("Причина: Не найдены данные о машинах в справочнике.")
+            return
+        # =========================================================
 
         # 4. Вспомогательные компоненты
         demand_manager = DemandManager([DemandStep(time_limit=1440, multiplier_x100=100)])
@@ -49,6 +73,8 @@ def main():
         if solution:
             print("--- Оптимизация завершена успешно ---")
             solution.print_summary()
+            exporter = LogisticsExcelExporter()
+            exporter.export(solution, output_path="data/маршруты_результат.xlsx")
         else:
             print("Решение не найдено. Проверьте ограничения сценария.")
 
