@@ -98,11 +98,12 @@ class SolutionPresenter:
             del_vol = 0
             for b in self.scenario.brands:
                 del_var = var_manager.get_delivery_var(vehicle.id, next_loc_id, b.id)
-                del_vol += solver.Value(del_var)
+                if del_var is not None:
+                    del_vol += solver.Value(del_var)
 
             # Вычисляем время обслуживания
-            service_time = int(del_vol / vehicle.unloading_speed) if vehicle.unloading_speed > 0 else 0
-
+            loc_obj = self.location_by_id[next_loc_id]
+            service_time = getattr(loc_obj, 'service_time', 0) if loc_obj else 0
             route_steps.append(RouteStep(
                 location=self.location_by_id[next_loc_id],
                 distance_from_prev=dist,

@@ -82,9 +82,11 @@ class ObjectiveBuilder:
         for v in self.scenario.vehicles:
             for store in self.scenario.stores:
                 for brand in self.scenario.brands:
-                    total_delivered_volume_terms.append(self.var_manager.get_delivery_var(v.id, store.id, brand.id))
+                    var = self.var_manager.get_delivery_var(v.id, store.id, brand.id)
+                    if var is not None:
+                        total_delivered_volume_terms.append(var)
 
-        total_delivered_volume = sum(total_delivered_volume_terms)
+        total_delivered_volume = sum(total_delivered_volume_terms) if total_delivered_volume_terms else 0
 
         # Здесь тоже важен логический лимит для знаменателя, чтобы не уйти в бесконечность
         # (цена за ящик берется из сценария)

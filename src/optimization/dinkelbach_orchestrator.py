@@ -30,7 +30,7 @@ class DinkelbachOrchestrator:
         self.solver = cp_model.CpSolver()
 
         # Настройки решателя (можно вынести в конфигурацию)
-        self.solver.parameters.max_time_in_seconds = 600.0  # 10 минут, для больших задач может быть увеличено
+        self.solver.parameters.max_time_in_seconds = 1800.0  # 10 минут, для больших задач может быть увеличено
         self.solver.parameters.num_workers = 8  # Использовать 8 ядер для поиска решения
         self.solver.parameters.log_search_progress = True  # Выводить логи прогресса
         self.solver.parameters.random_seed = 42  # Для воспроизводимости результатов (если возможно)

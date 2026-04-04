@@ -1,7 +1,5 @@
-# --- START OF FILE var_manager.py ---
-
 from ortools.sat.python import cp_model
-from typing import Optional
+from typing import Optional, Set, Dict, Tuple
 
 from src.optimization.pruner import RoutePruner
 from src.core.entities import Scenario
@@ -9,110 +7,111 @@ from src.core.entities import Scenario
 
 class VarManager:
     def __init__(self, model: cp_model.CpModel, scenario: Scenario, pruner: RoutePruner):
-        self.pruner = pruner
         self.model = model
         self.scenario = scenario
+        self.pruner = pruner
 
-        # --- РЕЕСТРЫ ПЕРЕМЕННЫХ ---
-        self.x = {}  # x_kij (движение: машина k из i в j)
-        self.arrival_times = {}  # m_jt'k (время прибытия машины k в точку j)
-        self.load_arriving = {} # load_arriving_k_j (загрузка ТС в ящиках при прибытии в точку j)
-        self.load_at_point = {}  # k_iq (загрузка ТС в ящиках при выезде из точки i)
+        # 1. Получаем разрешенные пары один раз
+        self.allowed_pairs = self.pruner.get_allowed_pairs()
 
-        # Объемы (m_lt'vk0Wb и m_lt'vk1Wb)
-        self.delivered_vol = {}  # m_lt'vk0 (сколько привезли бренда b в точку l машиной k)
-        self.pickup_vol = {}  # m_lt'vk1 (сколько забрали бренда b из точки l машиной k)
+        # 2. Определяем, какие локации вообще могут быть посещены (для фильтрации переменных)
+        # Включаем все точки, которые участвуют в разрешенных дугах + все склады (как базы)
+        self.reachable_locs: Set[str] = {loc_id for pair in self.allowed_pairs for loc_id in pair}
+        for wh in self.scenario.warehouses:
+            self.reachable_locs.add(wh.id)
 
-        # Складские переменные
-        self.wh_active = {}  # w_I (используется ли склад)
-        # wh_max_vol теперь будет представлять ОБЩИЙ ПОТОК (обработанный объем) для расчета стоимости склада
-        self.wh_max_vol = {}  # w_iv (общий объем, прошедший через склад)
+        # Реестры переменных
+        self.x: Dict[Tuple[int, str, str], cp_model.BoolVarT] = {}
+        self.arrival_times: Dict[Tuple[int, str], cp_model.IntVar] = {}
+        self.load_arriving: Dict[Tuple[int, str], cp_model.IntVar] = {}
+        self.load_at_point: Dict[Tuple[int, str], cp_model.IntVar] = {}
+        self.delivered_vol: Dict[Tuple[int, str, str], cp_model.IntVar] = {}
+        self.pickup_vol: Dict[Tuple[int, str, str], cp_model.IntVar] = {}
 
-        # Переменные для ReservoirConstraint
-        self.wh_stock_change_per_visit = {} # (wh_id, b_id, v_id) -> IntVar (delivered - pickedup)
-        self.wh_visit_intervals = {} # (wh_id, v_id) -> IntervalVar (ОДИН интервал на ВИЗИТ машины на склад)
-        self.wh_visit_active_flags = {} # (wh_id, v_id) -> BoolVar (активен ли визит машины на склад)
+        self.wh_active: Dict[str, cp_model.BoolVarT] = {}
+        self.wh_max_vol: Dict[str, cp_model.IntVar] = {}
+        self.wh_stock_change_per_visit: Dict[Tuple[str, str, int], cp_model.IntVar] = {}
+        self.wh_visit_intervals: Dict[Tuple[str, int], cp_model.IntervalVar] = {}
+        self.wh_visit_active_flags: Dict[Tuple[str, int], cp_model.BoolVarT] = {}
 
-        # Итоги по машинам для целевой функции
-        self.vehicle_used = {}  # w_I для машин
-        self.total_dist = {}  # k_is'' (общий путь)
-        self.total_time = {}  # k_it'' (время смены: m_kfinish - m_kstart)
-        self.shift_start = {}  # m_kstart (время начала работы водителя)
-        self.shift_end = {}  # m_kfinish (время окончания работы водителя)
+        self.vehicle_used: Dict[int, cp_model.BoolVarT] = {}
+        self.total_dist: Dict[int, cp_model.IntVar] = {}
+        self.total_time: Dict[int, cp_model.IntVar] = {}
+        self.shift_start: Dict[int, cp_model.IntVar] = {}
+        self.shift_end: Dict[int, cp_model.IntVar] = {}
 
-        # Запуск инициализации
         self._init_all_vars()
-        self.add_load_arriving_vars()
 
     def _init_all_vars(self):
-        """
-        Инициализация переменных с использованием фильтрации маршрутов (RoutePruner).
-        """
-        allowed_pairs = self.pruner.get_allowed_pairs()
-
+        # Переменные машин
         for v in self.scenario.vehicles:
-            self.vehicle_used[v.id] = self.model.new_bool_var(f'used_v{v.id}')
-            self.total_dist[v.id] = self.model.new_int_var(0, 1_000_000, f'dist_v{v.id}')
-            self.total_time[v.id] = self.model.new_int_var(0, 1440, f'total_t_v{v.id}')
-            self.shift_start[v.id] = self.model.new_int_var(0, 1440, f'start_v{v.id}')
-            self.shift_end[v.id] = self.model.new_int_var(0, 1440, f'end_v{v.id}')
+            v_id = v.id
+            self.vehicle_used[v_id] = self.model.new_bool_var(f'used_v{v_id}')
+            self.total_dist[v_id] = self.model.new_int_var(0, 1_000_000, f'dist_v{v_id}')
+            self.total_time[v_id] = self.model.new_int_var(0, 1440, f'total_t_v{v_id}')
+            self.shift_start[v_id] = self.model.new_int_var(0, 1440, f'start_v{v_id}')
+            self.shift_end[v_id] = self.model.new_int_var(0, 1440, f'end_v{v_id}')
 
-            for loc in self.scenario.all_locations:
-                self.arrival_times[(v.id, loc.id)] = self.model.new_int_var(0, 1440, f'arr_v{v.id}_l{loc.id}')
-                self.load_at_point[(v.id, loc.id)] = self.model.new_int_var(0, v.capacity, f'load_out_v{v.id}_l{loc.id}')
+            # Переменные ТОЛЬКО для достижимых локаций
+            for loc_id in self.reachable_locs:
+                self.arrival_times[(v_id, loc_id)] = self.model.new_int_var(0, 1440, f'arr_v{v_id}_l{loc_id}')
+                self.load_arriving[(v_id, loc_id)] = self.model.new_int_var(0, v.capacity,
+                                                                            f'load_arr_v{v_id}_l{loc_id}')
+                self.load_at_point[(v_id, loc_id)] = self.model.new_int_var(0, v.capacity,
+                                                                            f'load_out_v{v_id}_l{loc_id}')
 
                 for b in self.scenario.brands:
-                    self.delivered_vol[(v.id, loc.id, b.id)] = self.model.new_int_var(0, v.capacity, f'del_v{v.id}_l{loc.id}_b{b.id}')
-                    self.pickup_vol[(v.id, loc.id, b.id)] = self.model.new_int_var(0, v.capacity, f'pick_v{v.id}_l{loc.id}_b{b.id}')
+                    self.delivered_vol[(v_id, loc_id, b.id)] = self.model.new_int_var(0, v.capacity,
+                                                                                      f'del_v{v_id}_l{loc_id}_b{b.id}')
+                    self.pickup_vol[(v_id, loc_id, b.id)] = self.model.new_int_var(0, v.capacity,
+                                                                                   f'pick_v{v_id}_l{loc_id}_b{b.id}')
 
-            for i_id, j_id in allowed_pairs:
-                self.x[(v.id, i_id, j_id)] = self.model.new_bool_var(f'x_v{v.id}_{i_id}_{j_id}')
+            # Дуги только разрешенные прунером
+            for i_id, j_id in self.allowed_pairs:
+                self.x[(v_id, i_id, j_id)] = self.model.new_bool_var(f'x_v{v_id}_{i_id}_{j_id}')
 
+        # Переменные складов
         for wh in self.scenario.warehouses:
-            self.wh_active[wh.id] = self.model.new_bool_var(f'wh_active_{wh.id}')
-            self.wh_max_vol[wh.id] = self.model.new_int_var(0, 10_000_000, f'wh_max_flow_w{wh.id}')
+            wh_id = wh.id
+            self.wh_active[wh_id] = self.model.new_bool_var(f'wh_active_{wh_id}')
+            self.wh_max_vol[wh_id] = self.model.new_int_var(0, 10_000_000, f'wh_max_flow_w{wh_id}')
 
             for v in self.scenario.vehicles:
-                # Один интервал на визит машины v на склад wh.
-                # Он будет активен, если машина посещает склад.
-                self.wh_visit_active_flags[(wh.id, v.id)] = self.model.new_bool_var(f'wh_visit_active_w{wh.id}_v{v.id}')
-                self.wh_visit_intervals[(wh.id, v.id)] = self.model.new_optional_interval_var(
-                    self.model.new_int_var(0, 1440, f'wh_int_start_w{wh.id}_v{v.id}'), # start
-                    self.model.new_int_var(0, 1440, f'wh_int_dur_w{wh.id}_v{v.id}'),   # duration
-                    self.model.new_int_var(0, 2880, f'wh_int_end_w{wh.id}_v{v.id}'),   # end
-                    self.wh_visit_active_flags[(wh.id, v.id)],                      # is_present
-                    f'wh_visit_int_w{wh.id}_v{v.id}'
+                v_id = v.id
+                v_active_at_wh = self.model.new_bool_var(f'wh_visit_active_w{wh_id}_v{v_id}')
+                self.wh_visit_active_flags[(wh_id, v_id)] = v_active_at_wh
+
+                self.wh_visit_intervals[(wh_id, v_id)] = self.model.new_optional_interval_var(
+                    self.model.new_int_var(0, 1440, f'wh_start_w{wh_id}_v{v_id}'),
+                    self.model.new_int_var(0, 1440, f'wh_dur_w{wh_id}_v{v_id}'),
+                    self.model.new_int_var(0, 2880, f'wh_end_w{wh_id}_v{v_id}'),
+                    v_active_at_wh,
+                    f'wh_interval_w{wh_id}_v{v_id}'
                 )
 
                 for b in self.scenario.brands:
-                    # Изменение запаса для бренда B на складе WH, вызванное визитом машины V
-                    self.wh_stock_change_per_visit[(wh.id, b.id, v.id)] = self.model.new_int_var(
-                        -v.capacity, v.capacity, f'stock_change_w{wh.id}_b{b.id}_v{v.id}'
+                    self.wh_stock_change_per_visit[(wh_id, b.id, v_id)] = self.model.new_int_var(
+                        -v.capacity, v.capacity, f'stock_ch_w{wh_id}_b{b.id}_v{v_id}'
                     )
 
-    def add_load_arriving_vars(self):
-        for v in self.scenario.vehicles:
-            for loc in self.scenario.all_locations:
-                self.load_arriving[(v.id, loc.id)] = self.model.new_int_var(0, v.capacity, f"load_arr_v{v.id}_l{loc.id}")
-
-    # --- Геттеры ---
+    # --- Безопасные геттеры (возвращают None если переменной нет) ---
     def get_routing_var(self, v_id: int, i: str, j: str) -> Optional[cp_model.BoolVarT]:
         return self.x.get((v_id, i, j))
 
-    def get_arrival_var(self, v_id: int, loc_id: str) -> cp_model.IntVar:
-        return self.arrival_times[(v_id, loc_id)]
+    def get_arrival_var(self, v_id: int, loc_id: str) -> Optional[cp_model.IntVar]:
+        return self.arrival_times.get((v_id, loc_id))
 
-    def get_load_arriving_var(self, v_id: int, loc_id: str) -> cp_model.IntVar:
-        return self.load_arriving[(v_id, loc_id)]
+    def get_load_arriving_var(self, v_id: int, loc_id: str) -> Optional[cp_model.IntVar]:
+        return self.load_arriving.get((v_id, loc_id))
 
-    def get_load_at_point_var(self, v_id: int, loc_id: str) -> cp_model.IntVar:
-        return self.load_at_point[(v_id, loc_id)]
+    def get_load_at_point_var(self, v_id: int, loc_id: str) -> Optional[cp_model.IntVar]:
+        return self.load_at_point.get((v_id, loc_id))
 
-    def get_delivery_var(self, v_id: int, loc_id: str, brand_id: str) -> cp_model.IntVar:
-        return self.delivered_vol[(v_id, loc_id, brand_id)]
+    def get_delivery_var(self, v_id: int, loc_id: str, brand_id: str) -> Optional[cp_model.IntVar]:
+        return self.delivered_vol.get((v_id, loc_id, brand_id))
 
-    def get_pickup_var(self, v_id: int, loc_id: str, brand_id: str) -> cp_model.IntVar:
-        return self.pickup_vol[(v_id, loc_id, brand_id)]
+    def get_pickup_var(self, v_id: int, loc_id: str, brand_id: str) -> Optional[cp_model.IntVar]:
+        return self.pickup_vol.get((v_id, loc_id, brand_id))
 
     def get_wh_active_var(self, wh_id: str) -> cp_model.BoolVarT:
         return self.wh_active[wh_id]

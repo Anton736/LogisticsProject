@@ -30,8 +30,31 @@ class ConstraintFactory:
         print("Adding warehouse activity and stock constraints (using Reservoir)...")
         self._add_warehouse_constraints()
         print("Adding vehicle activity linkage constraints...")
+        self._add_symmetry_breaking_constraints()
+        print("Adding symmetry breaking constraints")
         self._add_vehicle_activity_linkage_constraints()
         print("All constraints added.")
+
+        # --- В файле constraints.py ---
+
+    def _add_symmetry_breaking_constraints(self):
+        """
+        Если машины идентичны, заставляем солвер использовать их по порядку.
+        Машина k+1 может быть активна только если активна машина k.
+        """
+        vehicles = self.scenario.vehicles
+        for i in range(len(vehicles) - 1):
+            v_curr = vehicles[i]
+            v_next = vehicles[i + 1]
+
+            # Если у машин одинаковые характеристики (цена, вместимость)
+            if (v_curr.capacity == v_next.capacity and
+                    v_curr.cost_km == v_next.cost_km):
+                used_curr = self.var_manager.get_vehicle_used_var(v_curr.id)
+                used_next = self.var_manager.get_vehicle_used_var(v_next.id)
+
+                # Запрещаем использовать следующую без предыдущей
+                self.model.add(used_curr >= used_next)
 
     def _get_service_time_expr(self, v: Vehicle, loc: Location) -> cp_model.LinearExpr:
         total_vol_at_loc = self.model.new_int_var(0, v.capacity * 2, f"total_vol_v{v.id}_l{loc.id}_service")
@@ -40,18 +63,27 @@ class ConstraintFactory:
                        sum(self.var_manager.get_pickup_var(v.id, loc.id, b.id) for b in self.scenario.brands))
 
         if isinstance(loc, Store):
-            if v.unloading_speed < 1e-6: return self.model.new_constant(0)
+            #if v.unloading_speed < 1e-6: return self.model.new_constant(0)
             #div_result = self.model.new_int_var(0, 1440, f"service_time_st_{loc.id}_v{v.id}")
             #self.model.add_division_equality(div_result, total_vol_at_loc, int(v.unloading_speed))
             #return div_result
             return self.model.new_constant(int(loc.service_time))
 
         elif isinstance(loc, Warehouse):
-            if loc.handling_speed < 1e-6: return self.model.new_constant(0)
-            div_result = self.model.new_int_var(0, 1440, f"service_time_wh_{loc.id}_v{v.id}")
-            self.model.add_division_equality(div_result, total_vol_at_loc, int(loc.handling_speed))
-            return div_result
+            flow_vars = []
+            for b in self.scenario.brands:
+                d_v = self.var_manager.get_delivery_var(v.id, loc.id, b.id)
+                p_v = self.var_manager.get_pickup_var(v.id, loc.id, b.id)
+                if d_v is not None: flow_vars.append(d_v)
+                if p_v is not None: flow_vars.append(p_v)
 
+            if not flow_vars: return self.model.new_constant(0)
+            if loc.handling_speed < 1e-6: return self.model.new_constant(0)
+
+            total_vol = sum(flow_vars)
+            div_result = self.model.new_int_var(0, 1440, f"serv_wh_{loc.id}_v{v.id}")
+            self.model.add_division_equality(div_result, total_vol, int(loc.handling_speed))
+            return div_result
         return self.model.new_constant(0)
 
     def _add_routing_constraints(self):
@@ -60,52 +92,57 @@ class ConstraintFactory:
         for v in self.scenario.vehicles:
             is_used = self.var_manager.get_vehicle_used_var(v.id)
 
-            # 0. Запрет петель (машина не едет сама к себе)
+            # 0. Запрет петель
             for loc in self.scenario.all_locations:
                 x_var = self.var_manager.get_routing_var(v.id, loc.id, loc.id)
-                if x_var is not None:
+                if x_var is not None and not isinstance(x_var, int):
                     self.model.add(x_var == 0)
 
-            # 1. Начало маршрута строго на складе (Depot)
+            # 1. Начало маршрута строго на складе
             start_arcs = []
             for wh in self.scenario.warehouses:
                 for j in self.scenario.all_locations:
                     x_var = self.var_manager.get_routing_var(v.id, wh.id, j.id)
-                    if x_var is not None: start_arcs.append(x_var)
-
-            self.model.add(sum(start_arcs) == is_used)
-
-            # 2. Консервация потока для OPEN VRP (маршрут может закончиться где угодно)
-            end_flags = []
-
-            for loc in self.scenario.all_locations:
-                incoming_vars = []
-                outgoing_vars = []
-                for i_id, j_id in allowed_pairs:
-                    x_var = self.var_manager.get_routing_var(v.id, i_id, j_id)
                     if x_var is not None:
-                        if j_id == loc.id: incoming_vars.append(x_var)
-                        if i_id == loc.id: outgoing_vars.append(x_var)
+                        start_arcs.append(x_var)
+
+            if start_arcs:
+                self.model.add(sum(start_arcs) == is_used)
+
+            # 2. Консервация потока (Open VRP + Возврат на склад)
+            end_flags = []
+            for loc in self.scenario.all_locations:
+                # Собираем входящие и исходящие дуги для этой локации
+                incoming_vars = [self.var_manager.get_routing_var(v.id, i_id, loc.id)
+                                 for i_id, j_id in allowed_pairs if j_id == loc.id]
+                outgoing_vars = [self.var_manager.get_routing_var(v.id, loc.id, j_id)
+                                 for i_id, j_id in allowed_pairs if i_id == loc.id]
+
+                # Фильтруем None
+                incoming_vars = [v for v in incoming_vars if v is not None]
+                outgoing_vars = [v for v in outgoing_vars if v is not None]
+
+                if not incoming_vars and not outgoing_vars:
+                    continue
 
                 # В любую точку можно въехать максимум 1 раз
                 self.model.add(sum(incoming_vars) <= 1)
 
+                is_end_here = self.model.new_bool_var(f"end_loc_v{v.id}_l{loc.id}")
                 if isinstance(loc, Store):
-                    # Для магазинов: Вход - Выход = Флаг остановки (is_end_here)
-                    # Если машина зашла (1) и не вышла (0) -> is_end_here = 1 (Конец смены)
-                    is_end_here = self.model.new_bool_var(f"end_loc_v{v.id}_l{loc.id}")
+                    # Вход - Выход = Флаг остановки
                     self.model.add(sum(incoming_vars) - sum(outgoing_vars) == is_end_here)
-                    end_flags.append(is_end_here)
                 else:
-                    # Для складов: машина тоже может вернуться на склад в конце смены
-                    is_end_wh = self.model.new_bool_var(f"end_wh_v{v.id}_w{loc.id}")
-                    self.model.add(sum(incoming_vars) == is_end_wh)
-                    end_flags.append(is_end_wh)
+                    # Для складов: машина может закончить путь, просто въехав на склад
+                    self.model.add(sum(incoming_vars) == is_end_here)
 
-            # ГЛАВНОЕ ПРАВИЛО: Каждая активная машина должна сделать строго 1 конечную остановку
-            self.model.add(sum(end_flags) == is_used)
+                end_flags.append(is_end_here)
 
-            # 3. Связь с общим пройденным расстоянием
+            # ГЛАВНОЕ ПРАВИЛО: 1 конечная остановка
+            if end_flags:
+                self.model.add(sum(end_flags) == is_used)
+
+            # 3. Расстояние
             path_dist_terms = []
             for i_id, j_id in allowed_pairs:
                 x_var = self.var_manager.get_routing_var(v.id, i_id, j_id)
@@ -113,15 +150,11 @@ class ConstraintFactory:
                     dist = self.scenario.network.distance_matrix[i_id][j_id]
                     path_dist_terms.append(x_var * int(dist * 100))
 
-            total_dist_scaled = self.model.new_int_var(0, 1_000_000 * 100, f'dist_scaled_v{v.id}')
+            total_dist_scaled = self.model.new_int_var(0, 1_000_000 * 100, f'dist_sc_v{v.id}')
             self.model.add(total_dist_scaled == sum(path_dist_terms)).OnlyEnforceIf(is_used)
             self.model.add(total_dist_scaled == 0).OnlyEnforceIf(is_used.Not())
 
-            self.model.add_division_equality(
-                self.var_manager.get_total_dist_var(v.id),
-                total_dist_scaled,
-                100
-            )
+            self.model.add_division_equality(self.var_manager.get_total_dist_var(v.id), total_dist_scaled, 100)
 
     def _add_load_flow_constraints(self):
         allowed_pairs = self.pruner.get_allowed_pairs()
@@ -211,67 +244,88 @@ class ConstraintFactory:
         for v in self.scenario.vehicles:
             is_used = self.var_manager.get_vehicle_used_var(v.id)
 
+            # 1. Зануляем прибытие в неиспользуемые точки
             for loc in self.scenario.all_locations:
-                self.model.add(self.var_manager.get_arrival_var(v.id, loc.id) == 0).OnlyEnforceIf(is_used.Not())
+                arr_var = self.var_manager.get_arrival_var(v.id, loc.id)
+                if arr_var is not None:
+                    self.model.add(arr_var == 0).OnlyEnforceIf(is_used.Not())
 
+            # 2. Логика старта со склада
             for wh in self.scenario.warehouses:
-                is_starting_wh = self.model.new_bool_var(f"is_start_wh_v{v.id}_wh{wh.id}")
+                is_starting_wh = self.model.new_bool_var(f"is_start_v{v.id}_wh{wh.id}")
                 outgoing = [self.var_manager.get_routing_var(v.id, wh.id, j.id)
-                            for j in self.scenario.all_locations if
-                            self.var_manager.get_routing_var(v.id, wh.id, j.id) is not None]
+                            for j in self.scenario.all_locations
+                            if self.var_manager.get_routing_var(v.id, wh.id, j.id) is not None]
 
                 if outgoing:
                     self.model.add_bool_or(outgoing).OnlyEnforceIf(is_starting_wh)
                     self.model.add(sum(outgoing) == 0).OnlyEnforceIf(is_starting_wh.Not())
-                    self.model.add(
-                        self.var_manager.get_arrival_var(v.id, wh.id) == self.var_manager.get_shift_start_var(
-                            v.id)).OnlyEnforceIf(is_starting_wh)
+
+                    arr_wh = self.var_manager.get_arrival_var(v.id, wh.id)
+                    if arr_wh is not None:
+                        # Время прибытия на первый склад = Время начала смены
+                        self.model.add(arr_wh == self.var_manager.get_shift_start_var(v.id)).OnlyEnforceIf(
+                            is_starting_wh)
                 else:
                     self.model.add(is_starting_wh == 0)
 
+            # 3. ПЕРЕХОДЫ МЕЖДУ ТОЧКАМИ (Главный цикл)
             for i in self.scenario.all_locations:
+                arr_i = self.var_manager.get_arrival_var(v.id, i.id)
+                if arr_i is None:
+                    continue  # Если машина v не может быть в i, нам нечего считать
+
+                # Считаем время обслуживания в точке i один раз для всех j
                 service_i = self._get_service_time_expr(v, i)
+
                 for j in self.scenario.all_locations:
                     x_kij = self.var_manager.get_routing_var(v.id, i.id, j.id)
-                    if x_kij is None: continue
+                    if x_kij is None:
+                        continue  # Если пути i->j нет в прунере, пропускаем
 
-                    arr_i = self.var_manager.get_arrival_var(v.id, i.id)
                     arr_j = self.var_manager.get_arrival_var(v.id, j.id)
-                    travel_ij = self.scenario.network.time_matrix[i.id][j.id]
+                    if arr_j is None:
+                        continue
 
+                    travel_ij = int(self.scenario.network.time_matrix[i.id][j.id])
+
+                    # Главное ограничение времени: Прибытие_j >= Прибытие_i + Работа_i + Дорога_ij
                     self.model.add(arr_j >= arr_i + service_i + travel_ij).OnlyEnforceIf(x_kij)
 
+                    # Окна доставки в точке j
                     loc_j = self.location_by_id[j.id]
                     if isinstance(loc_j, Store):
                         self.model.add(arr_j >= loc_j.time_start).OnlyEnforceIf(x_kij)
                         self.model.add(arr_j <= loc_j.time_end).OnlyEnforceIf(x_kij)
 
+            # 4. РАСЧЕТ ОБЩЕГО ВРЕМЕНИ СМЕНЫ
             all_relevant_arrivals = []
             all_relevant_departures = []
 
             for loc in self.scenario.all_locations:
-                is_visited = self.model.new_bool_var(f"v{v.id}_vis_{loc.id}")
-                arcs = [self.var_manager.get_routing_var(v.id, arc_i, arc_j)
-                        for arc_i, arc_j in allowed_pairs if (arc_i == loc.id or arc_j == loc.id)]
+                arr_loc = self.var_manager.get_arrival_var(v.id, loc.id)
+                if arr_loc is None: continue
+
+                # Проверяем, посещала ли машина эту точку (была ли хоть одна дуга)
+                arcs = [self.var_manager.get_routing_var(v.id, i, j)
+                        for i, j in allowed_pairs if (i == loc.id or j == loc.id)]
+                arcs = [a for a in arcs if a is not None]
 
                 if arcs:
+                    is_visited = self.model.new_bool_var(f"v{v.id}_vis_{loc.id}")
                     self.model.add_bool_or(arcs).OnlyEnforceIf(is_visited)
                     self.model.add(sum(arcs) == 0).OnlyEnforceIf(is_visited.Not())
-                else:
-                    self.model.add(is_visited == 0)
 
-                arr_val = self.model.new_int_var(0, 1440, f"arr_v{v.id}_{loc.id}")
-                self.model.add(arr_val == self.var_manager.get_arrival_var(v.id, loc.id)).OnlyEnforceIf(is_visited)
-                self.model.add(arr_val == 1440).OnlyEnforceIf(is_visited.Not())
-                all_relevant_arrivals.append(arr_val)
+                    # Вспомогательные переменные для Min/Max
+                    arr_val = self.model.new_int_var(0, 1440, "")
+                    self.model.add(arr_val == arr_loc).OnlyEnforceIf(is_visited)
+                    self.model.add(arr_val == 1440).OnlyEnforceIf(is_visited.Not())
+                    all_relevant_arrivals.append(arr_val)
 
-                dep_val = self.model.new_int_var(0, 2880, f"dep_v{v.id}_{loc.id}")
-                self.model.add(
-                    dep_val == self.var_manager.get_arrival_var(v.id, loc.id) + self._get_service_time_expr(v,
-                                                                                                            loc)).OnlyEnforceIf(
-                    is_visited)
-                self.model.add(dep_val == 0).OnlyEnforceIf(is_visited.Not())
-                all_relevant_departures.append(dep_val)
+                    dep_val = self.model.new_int_var(0, 2880, "")
+                    self.model.add(dep_val == arr_loc + self._get_service_time_expr(v, loc)).OnlyEnforceIf(is_visited)
+                    self.model.add(dep_val == 0).OnlyEnforceIf(is_visited.Not())
+                    all_relevant_departures.append(dep_val)
 
             s_start = self.var_manager.get_shift_start_var(v.id)
             s_end = self.var_manager.get_shift_end_var(v.id)
@@ -281,10 +335,10 @@ class ConstraintFactory:
                 self.model.add_min_equality(s_start, all_relevant_arrivals)
                 self.model.add_max_equality(s_end, all_relevant_departures)
                 self.model.add(s_total == s_end - s_start).OnlyEnforceIf(is_used)
-
-            self.model.add(s_start == 0).OnlyEnforceIf(is_used.Not())
-            self.model.add(s_end == 0).OnlyEnforceIf(is_used.Not())
-            self.model.add(s_total == 0).OnlyEnforceIf(is_used.Not())
+            else:
+                self.model.add(s_start == 0)
+                self.model.add(s_end == 0)
+                self.model.add(s_total == 0)
 
     def _add_demand_satisfaction_constraints(self):
         v_cap_sum = sum(v.capacity for v in self.scenario.vehicles)
@@ -384,7 +438,11 @@ class ConstraintFactory:
     def _add_vehicle_activity_linkage_constraints(self):
         for v in self.scenario.vehicles:
             is_used = self.var_manager.get_vehicle_used_var(v.id)
-            all_arcs = [var for (vid, i, j), var in self.var_manager.x.items() if vid == v.id]
+            all_arcs = []
+            for i_id, j_id in self.pruner.get_allowed_pairs():
+                arc_var = self.var_manager.get_routing_var(v.id, i_id, j_id)
+                if arc_var is not None:
+                    all_arcs.append(arc_var)
             if all_arcs:
                 self.model.add(sum(all_arcs) > 0).OnlyEnforceIf(is_used)
                 self.model.add(sum(all_arcs) == 0).OnlyEnforceIf(is_used.Not())
@@ -446,6 +504,11 @@ class ConstraintFactory:
 
                     # 2. Собираем события от визитов машин
                     for v_obj in self.scenario.vehicles:
+                        del_v = self.var_manager.get_delivery_var(v_obj.id, wh.id, b.id)
+                        pick_v = self.var_manager.get_pickup_var(v_obj.id, wh.id, b.id)
+
+                        # Если переменных нет — машина не посещает склад
+                        if del_v is None or pick_v is None: continue
                         change = self.var_manager.get_wh_stock_change_per_visit_var(wh.id, b.id, v_obj.id)
                         self.model.add(change == self.var_manager.get_delivery_var(v_obj.id, wh.id, b.id) -
                                        self.var_manager.get_pickup_var(v_obj.id, wh.id, b.id))
