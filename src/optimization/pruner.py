@@ -75,7 +75,9 @@ class RoutePruner:
                     continue
                 if (i.id, j.id) in self._pruned_factory_dc_pairs:
                     continue
-                if isinstance(i, Warehouse) or isinstance(j, Warehouse):
+                # Любая точка ДОЛЖНА иметь возможность соединиться со складом напрямую
+                if i.id in [w.id for w in self.scenario.warehouses] or j.id in [w.id for w in
+                                                                                self.scenario.warehouses]:
                     allowed.append((i.id, j.id))
                     continue
                 if j.id in self._neighbor_cache.get(i.id, set()):

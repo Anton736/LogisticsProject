@@ -46,7 +46,7 @@ class LogisticsExcelExporter:
                     "время": step.time_from_prev,
                     "кол-во ед. продукции": step.delivered_volume,
                     "временной промежуток на разгрузку": step.service_time,
-                    "кол-во ящиков текущее": step.delivered_volume,
+                     "кол-во ящиков текущее": step.delivered_crates,
                     "кол-во продукции план": plan_qty,
                     "окно доставки с": time_from,
                     "окно доставки по": time_to

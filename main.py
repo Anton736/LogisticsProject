@@ -37,9 +37,12 @@ def main():
         print(f"Магазинов (Stores): {len(scenario.stores)}")
         print(f"Складов (Warehouses): {len(scenario.warehouses)}")
         print(f"Машин (Vehicles): {len(scenario.vehicles)}")
-        total_demand = sum(store.demands["B1"][1440] for store in scenario.stores)
-        total_capacity = sum(v.capacity for v in scenario.vehicles)
-        print(f"Общий заказ: {total_demand} ящиков. Вместимость автопарка: {total_capacity} ящиков.")
+        total_demand_units = sum(store.demands["B1"][1440] for store in scenario.stores)
+        total_capacity_crates = sum(v.capacity for v in scenario.vehicles)
+        total_capacity_units = total_capacity_crates * scenario.units_per_crate
+
+        print(f"Общий заказ: {total_demand_units} ЕДИНИЦ продукции.")
+        print(f"Вместимость: {total_capacity_crates} ЯЩИКОВ (или {total_capacity_units} единиц).")
         print("-------------------------------\n")
 
         if len(scenario.stores) == 0:
@@ -57,7 +60,7 @@ def main():
 
         # 4. Вспомогательные компоненты
         demand_manager = DemandManager([DemandStep(time_limit=1440, multiplier_x100=100)])
-        pruner = RoutePruner(scenario)
+        pruner = RoutePruner(scenario, min_k_neighbors=15,max_k_neighbors=25)
 
         # 5. Оптимизация
         print("Шаг 2: Запуск оптимизации (Алгоритм Динкельбаха)...")

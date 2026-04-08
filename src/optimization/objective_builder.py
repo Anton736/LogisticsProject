@@ -8,7 +8,7 @@ from src.optimization.var_manager import VarManager
 
 
 class ObjectiveBuilder:
-    def __init__(self, model: cp_model.CpModel, scenario: Scenario, var_manager: VarManager, scale_factor: int = 1000):
+    def __init__(self, model: cp_model.CpModel, scenario: Scenario, var_manager: VarManager, scale_factor: int = 1):
         self.model = model
         self.scenario = scenario
         self.var_manager = var_manager
@@ -44,9 +44,9 @@ class ObjectiveBuilder:
 
             cost_call_scaled = self._scale(v.cost_call)
             cost_km_scaled = self._scale(v.cost_km)
-            cost_hour_scaled = self._scale(v.cost_hour)
+            cost_minute_scaled = self._scale(v.cost_hour/60.0)
 
-            cost_expr = cost_call_scaled * vehicle_used + cost_km_scaled * total_dist + cost_hour_scaled * total_time
+            cost_expr = cost_call_scaled * vehicle_used + cost_km_scaled * total_dist + cost_minute_scaled * total_time
 
             self.model.add(vehicle_cost_var == cost_expr).OnlyEnforceIf(vehicle_used)
             self.model.add(vehicle_cost_var == 0).OnlyEnforceIf(vehicle_used.Not())
@@ -55,25 +55,27 @@ class ObjectiveBuilder:
 
         # 2. Затраты на склады
         for wh in self.scenario.warehouses:
-            wh_active = self.var_manager.get_wh_active_var(wh.id)
-            wh_max_vol = self.var_manager.get_wh_max_vol_var(wh.id)
-
-            # РАССЧИТЫВАЕМ РЕАЛЬНЫЙ МАКСИМУМ для склада
-            # (фикс_затраты + цена_ед * весь_объем_всех_машин) * запас 20%
-            wh_max_cost_raw = (wh.fixed_staff_cost + (wh.cost_per_volume * total_fleet_capacity))
-            wh_logical_max = int(wh_max_cost_raw * 1.2 * self.scale_factor)
-
-            warehouse_cost_var = self.model.new_int_var(0, wh_logical_max, f'cost_wh{wh.id}')
-
-            cost_per_vol_scaled = self._scale(wh.cost_per_volume)
-            fixed_cost_scaled = self._scale(wh.fixed_staff_cost)
-
-            cost_expr = cost_per_vol_scaled * wh_max_vol + fixed_cost_scaled
-
-            self.model.add(warehouse_cost_var == cost_expr).OnlyEnforceIf(wh_active)
-            self.model.add(warehouse_cost_var == 0).OnlyEnforceIf(wh_active.Not())
-
-            total_cost_numerator_terms.append(warehouse_cost_var)
+            if wh.is_factory:
+                continue
+            # wh_active = self.var_manager.get_wh_active_var(wh.id)
+            # wh_max_vol = self.var_manager.get_wh_max_vol_var(wh.id)
+            #
+            # # РАССЧИТЫВАЕМ РЕАЛЬНЫЙ МАКСИМУМ для склада
+            # # (фикс_затраты + цена_ед * весь_объем_всех_машин) * запас 20%
+            # wh_max_cost_raw = (wh.fixed_staff_cost + (wh.cost_per_volume * total_fleet_capacity))
+            # wh_logical_max = int(wh_max_cost_raw * 1.2 * self.scale_factor)
+            #
+            # warehouse_cost_var = self.model.new_int_var(0, wh_logical_max, f'cost_wh{wh.id}')
+            #
+            # cost_per_vol_scaled = self._scale(wh.cost_per_volume)
+            # fixed_cost_scaled = self._scale(wh.fixed_staff_cost)
+            #
+            # cost_expr = cost_per_vol_scaled * wh_max_vol + fixed_cost_scaled
+            #
+            # self.model.add(warehouse_cost_var == cost_expr).OnlyEnforceIf(wh_active)
+            # self.model.add(warehouse_cost_var == 0).OnlyEnforceIf(wh_active.Not())
+            #
+            # total_cost_numerator_terms.append(warehouse_cost_var)
 
         numerator_expr = sum(total_cost_numerator_terms)
 

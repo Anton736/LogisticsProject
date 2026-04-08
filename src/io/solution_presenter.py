@@ -96,10 +96,14 @@ class SolutionPresenter:
 
             # Вытаскиваем объем доставки в эту точку
             del_vol = 0
+            del_crates = 0
             for b in self.scenario.brands:
                 del_var = var_manager.get_delivery_var(vehicle.id, next_loc_id, b.id)
+                crates_var = var_manager.get_delivery_crates_var(vehicle.id, next_loc_id, b.id)
                 if del_var is not None:
                     del_vol += solver.Value(del_var)
+                if crates_var is not None:
+                    del_crates += solver.Value(crates_var)
 
             # Вычисляем время обслуживания
             loc_obj = self.location_by_id[next_loc_id]
@@ -109,7 +113,8 @@ class SolutionPresenter:
                 distance_from_prev=dist,
                 time_from_prev=time_ij,
                 delivered_volume=del_vol,
-                service_time=service_time
+                service_time=service_time,
+                delivered_crates=del_crates
             ))
 
             curr_loc_id = next_loc_id

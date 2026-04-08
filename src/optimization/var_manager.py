@@ -25,15 +25,18 @@ class VarManager:
         self.arrival_times: Dict[Tuple[int, str], cp_model.IntVar] = {}
         self.load_arriving: Dict[Tuple[int, str], cp_model.IntVar] = {}
         self.load_at_point: Dict[Tuple[int, str], cp_model.IntVar] = {}
-        self.delivered_vol: Dict[Tuple[int, str, str], cp_model.IntVar] = {}
+        self.delivered_vol: Dict[Tuple[int, str, str], cp_model.IntVar] = {}   # единицы продукции
+        self.delivered_crates: Dict[Tuple[int, str, str], cp_model.IntVar] = {}  # ящики = ceil(units/K)
         self.pickup_vol: Dict[Tuple[int, str, str], cp_model.IntVar] = {}
-
+        self.pickup_crates: Dict[Tuple[int, str, str], cp_model.IntVar] = {}
         self.wh_active: Dict[str, cp_model.BoolVarT] = {}
         self.wh_max_vol: Dict[str, cp_model.IntVar] = {}
         self.wh_stock_change_per_visit: Dict[Tuple[str, str, int], cp_model.IntVar] = {}
         self.wh_visit_intervals: Dict[Tuple[str, int], cp_model.IntervalVar] = {}
         self.wh_visit_active_flags: Dict[Tuple[str, int], cp_model.BoolVarT] = {}
-
+        self.is_visited_flags: Dict[Tuple[int, str], cp_model.BoolVarT] = {}
+        self.is_end_flags: Dict[Tuple[int, str], cp_model.BoolVarT] = {}
+        self.service_time_cache: Dict[Tuple[int, str], cp_model.LinearExpr] = {}
         self.vehicle_used: Dict[int, cp_model.BoolVarT] = {}
         self.total_dist: Dict[int, cp_model.IntVar] = {}
         self.total_time: Dict[int, cp_model.IntVar] = {}
@@ -55,16 +58,25 @@ class VarManager:
             # Переменные ТОЛЬКО для достижимых локаций
             for loc_id in self.reachable_locs:
                 self.arrival_times[(v_id, loc_id)] = self.model.new_int_var(0, 1440, f'arr_v{v_id}_l{loc_id}')
-                self.load_arriving[(v_id, loc_id)] = self.model.new_int_var(0, v.capacity,
-                                                                            f'load_arr_v{v_id}_l{loc_id}')
-                self.load_at_point[(v_id, loc_id)] = self.model.new_int_var(0, v.capacity,
-                                                                            f'load_out_v{v_id}_l{loc_id}')
+                self.is_visited_flags[(v_id, loc_id)] = self.model.new_bool_var(f'vis_v{v_id}_l{loc_id}')
+                self.is_end_flags[(v_id, loc_id)] = self.model.new_bool_var(f'end_v{v_id}_l{loc_id}')
+
+                # --- ИЗМЕНЕНИЕ: Гибкий лимит кузова ---
+                # Максимум - это либо вместимость в ящиках, либо вместимость в штуках
+                max_load = max(v.capacity, v.capacity * self.scenario.units_per_crate)
+                self.load_arriving[(v_id, loc_id)] = self.model.new_int_var(0, max_load, f'load_arr_v{v_id}_l{loc_id}')
+                self.load_at_point[(v_id, loc_id)] = self.model.new_int_var(0, max_load, f'load_out_v{v_id}_l{loc_id}')
 
                 for b in self.scenario.brands:
-                    self.delivered_vol[(v_id, loc_id, b.id)] = self.model.new_int_var(0, v.capacity,
+                    max_units = self.scenario.units_per_crate * v.capacity
+                    self.delivered_vol[(v_id, loc_id, b.id)] = self.model.new_int_var(0, max_units,
                                                                                       f'del_v{v_id}_l{loc_id}_b{b.id}')
-                    self.pickup_vol[(v_id, loc_id, b.id)] = self.model.new_int_var(0, v.capacity,
+                    self.delivered_crates[(v_id, loc_id, b.id)] = self.model.new_int_var(0, v.capacity,
+                                                                                         f'crates_v{v_id}_l{loc_id}_b{b.id}')
+                    self.pickup_vol[(v_id, loc_id, b.id)] = self.model.new_int_var(0, max_units,
                                                                                    f'pick_v{v_id}_l{loc_id}_b{b.id}')
+                    self.pickup_crates[(v_id, loc_id, b.id)] = self.model.new_int_var(0, v.capacity,
+                                                                                      f'pick_cr_v{v_id}_l{loc_id}_b{b.id}')
 
             # Дуги только разрешенные прунером
             for i_id, j_id in self.allowed_pairs:
@@ -74,7 +86,7 @@ class VarManager:
         for wh in self.scenario.warehouses:
             wh_id = wh.id
             self.wh_active[wh_id] = self.model.new_bool_var(f'wh_active_{wh_id}')
-            self.wh_max_vol[wh_id] = self.model.new_int_var(0, 10_000_000, f'wh_max_flow_w{wh_id}')
+            self.wh_max_vol[wh_id] = self.model.new_int_var(0, 10_000, f'wh_max_flow_w{wh_id}')
 
             for v in self.scenario.vehicles:
                 v_id = v.id
@@ -90,8 +102,10 @@ class VarManager:
                 )
 
                 for b in self.scenario.brands:
+                    # Переводим физическую вместимость машины в максимльное кол-во штук
+                    max_stock_change = v.capacity * self.scenario.units_per_crate
                     self.wh_stock_change_per_visit[(wh_id, b.id, v_id)] = self.model.new_int_var(
-                        -v.capacity, v.capacity, f'stock_ch_w{wh_id}_b{b.id}_v{v_id}'
+                        -max_stock_change, max_stock_change, f'stock_ch_w{wh_id}_b{b.id}_v{v_id}'
                     )
 
     # --- Безопасные геттеры (возвращают None если переменной нет) ---
@@ -109,6 +123,10 @@ class VarManager:
 
     def get_delivery_var(self, v_id: int, loc_id: str, brand_id: str) -> Optional[cp_model.IntVar]:
         return self.delivered_vol.get((v_id, loc_id, brand_id))
+
+    def get_delivery_crates_var(self, v_id: int, loc_id: str, brand_id: str) -> Optional[cp_model.IntVar]:
+        """Ящики занятые доставкой: ceil(delivered_units / units_per_crate)."""
+        return self.delivered_crates.get((v_id, loc_id, brand_id))
 
     def get_pickup_var(self, v_id: int, loc_id: str, brand_id: str) -> Optional[cp_model.IntVar]:
         return self.pickup_vol.get((v_id, loc_id, brand_id))
@@ -142,3 +160,11 @@ class VarManager:
 
     def get_shift_end_var(self, v_id: int) -> cp_model.IntVar:
         return self.shift_end[v_id]
+
+    def get_pickup_crates_var(self, v_id: int, loc_id: str, brand_id: str) -> Optional[cp_model.IntVar]:
+        return self.pickup_crates.get((v_id, loc_id, brand_id))
+    def get_is_visited_var(self, v_id: int, loc_id: str) -> cp_model.BoolVarT:
+        return self.is_visited_flags.get((v_id, loc_id))
+
+    def get_is_end_var(self, v_id: int, loc_id: str) -> cp_model.BoolVarT:
+        return self.is_end_flags.get((v_id, loc_id))

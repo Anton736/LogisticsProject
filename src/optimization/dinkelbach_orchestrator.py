@@ -1,183 +1,85 @@
-# START OF FILE dinkelbach_orchestrator.py
 from ortools.sat.python import cp_model
-from typing import Optional, Dict, Any
-
-from src.core.entities import Scenario
 from src.optimization.var_manager import VarManager
-from src.optimization.pruner import RoutePruner
-from src.models.demand import DemandManager
 from src.optimization.constraints import ConstraintFactory
 from src.optimization.objective_builder import ObjectiveBuilder
-from src.core.enums import WarehouseCostMode
-from src.models.solution import Solution  # Будет создан ниже
-from src.io.solution_presenter import SolutionPresenter  # Будет создан ниже
-
+from src.io.solution_presenter import SolutionPresenter
 
 
 class DinkelbachOrchestrator:
-    def __init__(self,
-                 scenario: Scenario,
-                 pruner: RoutePruner,
-                 demand_manager: DemandManager,
-                 warehouse_cost_mode: WarehouseCostMode = WarehouseCostMode.PEAK_INPUT,
-                 objective_scale_factor: int = 1000):  # Для ObjBuilder
-
+    def __init__(self, scenario, pruner, demand_manager, warehouse_cost_mode, objective_scale_factor=1):
         self.scenario = scenario
         self.pruner = pruner
         self.demand_manager = demand_manager
         self.warehouse_cost_mode = warehouse_cost_mode
-        self.objective_scale_factor = objective_scale_factor  # Множитель для float в int в ObjectiveBuilder
+        self.objective_scale_factor = objective_scale_factor
         self.solver = cp_model.CpSolver()
+        # Ставим 2 минуты на итерацию
+        self.solver.parameters.max_time_in_seconds = 120.0
+        self.solver.parameters.log_search_progress = True
 
-        # Настройки решателя (можно вынести в конфигурацию)
-        self.solver.parameters.max_time_in_seconds = 1800.0  # 10 минут, для больших задач может быть увеличено
-        self.solver.parameters.num_workers = 8  # Использовать 8 ядер для поиска решения
-        self.solver.parameters.log_search_progress = True  # Выводить логи прогресса
-        self.solver.parameters.random_seed = 42  # Для воспроизводимости результатов (если возможно)
-
-    def solve(self, epsilon: float = 1e-6, max_iterations: int = 100) -> Optional[Solution]:
-        """
-        Реализует алгоритм Динкельбаха для решения дробно-линейной оптимизации.
-        Возвращает объект Solution, если найдено оптимальное решение.
-        """
-        best_lambda = 10.0  # Начальное значение лямбда
-        best_solution_info: Optional[Dict[str, Any]] = None  # Храним информацию о лучшем решении
-
-        # Масштабирующий фактор для лямбды, чтобы она была int при умножении на denominator_expr
-        # Если OBJ_SCALE = 1000 (3 знака), а нам нужна лямбда с 6-8 знаками, то 10^9 или 10^12
-        LAMBDA_SCALE_FACTOR = 10_000  # 5 знаков после запятой для лямбда
-
-        print(f"Starting Dinkelbach algorithm with epsilon={epsilon}, max_iterations={max_iterations}")
-        print(f"Objective scaling factor: {self.objective_scale_factor}, Lambda scaling factor: {LAMBDA_SCALE_FACTOR}")
+    def solve(self, epsilon=0.01, max_iterations=3):
+        current_lambda = 0.0
+        best_sol = None
+        # Масштаб для дробного коэффициента (лямбды)
+        L_SCALE = 1
 
         for iteration in range(max_iterations):
-            print(f"\n--- Dinkelbach Iteration {iteration + 1}, Current Lambda: {best_lambda:.8f} ---")
+            print(f"\n>>> ИТЕРАЦИЯ ДИНКЕЛЬБАХА {iteration + 1} (Lambda: {current_lambda:.4f})")
 
-            # Каждая итерация Динкельбаха требует нового экземпляра модели CP-SAT
             model = cp_model.CpModel()
             var_manager = VarManager(model, self.scenario, self.pruner)
+            factory = ConstraintFactory(model, self.scenario, var_manager, self.demand_manager, self.pruner)
 
             # Добавляем все ограничения
-            constraint_factory = ConstraintFactory(
-                model, self.scenario, var_manager, self.demand_manager, self.pruner,
-                warehouse_cost_mode=self.warehouse_cost_mode  # Передаем выбранный режим
-            )
-            constraint_factory.add_all_constraints()
+            factory.add_all_constraints()
 
-            # Строим выражения для числителя и знаменателя
-            objective_builder = ObjectiveBuilder(
-                model, self.scenario, var_manager, scale_factor=self.objective_scale_factor
-            )
-            numerator_expr, denominator_expr = objective_builder.build_objective_expressions()
+            # Строим выражения числителя (затраты) и знаменателя (выручка)
+            obj_builder = ObjectiveBuilder(model, self.scenario, var_manager, scale_factor=self.objective_scale_factor)
+            num_expr, den_expr = obj_builder.build_objective_expressions()
 
-            # ГАРАНТИЯ ДОСТАВКИ: Запрещаем алгоритму читерить и не доставлять ничего
-            model.add(denominator_expr >= 1)
+            # Целевая функция: Costs * L_SCALE - Value * current_lambda_int
+            l_int = int(current_lambda * L_SCALE)
+            model.minimize(num_expr * L_SCALE - den_expr * l_int)
 
-            # Формируем целевую функцию для текущей итерации Динкельбаха: Minimize (Numerator - lambda * Denominator)
-            # Все выражения уже масштабированы на `self.objective_scale_factor`.
-            # Теперь масштабируем всю целевую функцию на `LAMBDA_SCALE_FACTOR` для точности `lambda`.
-            scaled_lambda_int = int(best_lambda * LAMBDA_SCALE_FACTOR)
-
-            # Целевая функция: (Numerator * LAMBDA_SCALE_FACTOR) - (scaled_lambda_int * Denominator)
-            # Обе части выражения теперь целочисленные
-            objective_to_minimize = (numerator_expr * LAMBDA_SCALE_FACTOR) - (scaled_lambda_int * denominator_expr)
-            model.minimize(objective_to_minimize)
-
-            # Решаем модель
+            # Решаем
             status = self.solver.Solve(model)
 
-            if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
-                current_numerator_value_scaled = self.solver.Value(numerator_expr)
-                current_denominator_value_scaled = self.solver.Value(denominator_expr)
+            # ПРОВЕРКА: Есть ли хоть какое-то решение? (Даже если UNKNOWN)
+            has_response = False
+            try:
+                # Пытаемся получить значение целевой функции. Если оно есть - решение в памяти
+                _ = self.solver.ObjectiveValue()
+                has_response = True
+            except:
+                has_response = False
 
-                # Чтобы получить реальные, немасштабированные значения для расчета лямбды
-                # (и для вывода в SolutionPresenter)
-                current_numerator_value_real = current_numerator_value_scaled / self.objective_scale_factor
-                current_denominator_value_real = current_denominator_value_scaled / self.objective_scale_factor
+            if has_response:
+                print(f"Итерация {iteration + 1}: Статус {self.solver.StatusName(status)}, решение найдено!")
 
-                if current_denominator_value_real == 0:
-                    # Если знаменатель 0, это означает, что ничего не доставлено.
-                    # Если числитель тоже 0, то lambda=0 (идеально, но нереалистично).
-                    # Если числитель > 0, то дробь стремится к бесконечности.
-                    # В контексте VRP с дробной целью, 0 доставленных товаров обычно неоптимально,
-                    # если есть спрос и стоимость. Это может указывать на то, что
-                    # любая доставка слишком дорога.
-                    if current_numerator_value_real == 0:
-                        new_lambda = 0.0
-                        print(f"Iteration {iteration + 1}: Real Numerator = 0, Real Denominator = 0. New lambda = 0.")
-                    else:
-                        print(
-                            f"Iteration {iteration + 1}: Real Numerator = {current_numerator_value_real:.2f}, Real Denominator = 0. "
-                            "Cannot compute new lambda (divide by zero). This may indicate no cost-effective delivery is possible.")
-                        # Если на первом проходе (lambda=0) мы получаем 0 в знаменателе,
-                        # это означает, что даже бесплатная доставка невозможна или невыгодна.
-                        if iteration == 0 and current_numerator_value_real > 0:
-                            print("Problem might be fundamentally infeasible or optimal solution.py is zero delivery.")
-                            return None  # Или break, если хотим вернуть предыдущее лучшее решение
+                v_num = self.solver.Value(num_expr)
+                v_den = self.solver.Value(den_expr)
 
-                        # Если это не первый проход, и мы получили 0 в знаменателе,
-                        # это значит, что мы пытаемся снизить лямбду настолько, что доставка
-                        # становится нерентабельной или невозможной.
-                        # В таком случае, предыдущая лямбда была "лучше".
-                        print("Converged to a solution.py with zero denominator. Using previous best lambda.")
-                        break  # Считаем, что достигли предела.
-                else:
-                    new_lambda = current_numerator_value_real / current_denominator_value_real
+                # Считаем реальные значения (без масштабов)
+                real_num = v_num / self.objective_scale_factor
+                real_den = v_den / self.objective_scale_factor
 
-                print(
-                    f"Iteration {iteration + 1} results: Real Numerator = {current_numerator_value_real:.2f}, Real Denominator = {current_denominator_value_real:.2f}")
-                print(f"New lambda calculated: {new_lambda:.8f}")
+                # Новая лямбда (эффективность)
+                new_lambda = real_num / max(1.0, real_den)
+                new_lambda = min(new_lambda, 1000.0)  # <--- ДОБАВЬ ЭТО
+                print(f"Итог: Затраты={real_num:.2f}, Выручка={real_den:.2f}, Эффективность={new_lambda:.6f}")
 
-                if abs(new_lambda - best_lambda) < epsilon:
-                    print(f"Dinkelbach converged! Optimal lambda: {new_lambda:.8f}")
-                    best_solution_info = {
-                        "solver": self.solver,
-                        "var_manager": var_manager,
-                        "numerator_value_scaled": current_numerator_value_scaled,
-                        "denominator_value_scaled": current_denominator_value_scaled,
-                        "optimal_lambda": new_lambda,
-                        "objective_scale_factor": self.objective_scale_factor  # Сохраняем для Presenter
-                    }
-                    break  # Алгоритм сошелся
-                else:
-                    best_lambda = new_lambda
-                    # На каждом шаге сохраняем лучшее *найденное* решение, пока оно не сойдется
-                    best_solution_info = {
-                        "solver": self.solver,
-                        "var_manager": var_manager,
-                        "numerator_value_scaled": current_numerator_value_scaled,
-                        "denominator_value_scaled": current_denominator_value_scaled,
-                        "optimal_lambda": new_lambda,
-                        "objective_scale_factor": self.objective_scale_factor
-                    }
-            elif status == cp_model.INFEASIBLE:
-                print(f"Dinkelbach Iteration {iteration + 1}: Model is INFEASIBLE.")
-                if iteration == 0:
-                    print("Problem is fundamentally infeasible from the start.")
-                    return None
-                else:
-                    print(
-                        "Model became infeasible. This can happen if lambda is too high. Reverting to previous best solution.py.")
+                # Создаем объект решения
+                presenter = SolutionPresenter(self.scenario)
+                best_sol = presenter.build_solution(
+                    self.solver, var_manager, new_lambda, v_num, v_den, self.objective_scale_factor
+                )
+
+                if abs(new_lambda - current_lambda) < epsilon:
+                    print("Алгоритм сошелся по точности.")
                     break
-            elif status == cp_model.UNKNOWN:
-                print(f"Dinkelbach Iteration {iteration + 1}: Model ABORTED (e.g., timeout or user interrupt).")
-                break
+                current_lambda = new_lambda
             else:
-                print(f"Dinkelbach Iteration {iteration + 1}: Unknown solver status {self.solver.StatusName(status)}.")
+                print(f"Итерация {iteration + 1} завершилась без решения (Статус: {self.solver.StatusName(status)})")
                 break
 
-        if best_solution_info:
-            print("\n--- Building Final Solution Object ---")
-            presenter = SolutionPresenter(self.scenario)
-            final_solution = presenter.build_solution(
-                solver=best_solution_info["solver"],
-                var_manager=best_solution_info["var_manager"],
-                optimal_lambda=best_solution_info["optimal_lambda"],
-                numerator_value_scaled=best_solution_info["numerator_value_scaled"],
-                denominator_value_scaled=best_solution_info["denominator_value_scaled"],
-                objective_scale_factor=best_solution_info["objective_scale_factor"]
-            )
-            return final_solution
-        else:
-            print("No feasible or optimal solution.py found after Dinkelbach iterations.")
-            return None
+        return best_sol

@@ -38,6 +38,7 @@ class RouteStep:
     time_from_prev: int
     delivered_volume: int
     service_time: int
+    delivered_crates: int = 0
 @dataclass
 class VehicleAssignment:
     """Класс для хранения РЕЗУЛЬТАТОВ решения для конкретной машины"""
@@ -109,7 +110,8 @@ class Scenario:
     warehouses: List[Warehouse]
     network: TransportNetwork
     brands: List[Brand]
-    bread_unit_cost: float  # cost (матожидание цены)
+    bread_unit_cost: float   # цена за единицу продукции
+    units_per_crate: int = 1  # сколько единиц продукции в одном ящике
 
     @property
     def all_locations(self) -> List[Location]:
