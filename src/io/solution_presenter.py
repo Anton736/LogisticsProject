@@ -1,5 +1,6 @@
+import math
 from typing import List, Dict
-from src.core.entities import Scenario, Vehicle, Location, VehicleAssignment, WarehouseAssignment, RouteStep
+from src.core.entities import Scenario, Location, Store, VehicleAssignment, WarehouseAssignment, RouteStep
 from src.models.solution import Solution
 
 
@@ -8,35 +9,98 @@ class SolutionPresenter:
         self.scenario = scenario
         self.location_by_id: Dict[str, Location] = {loc.id: loc for loc in scenario.all_locations}
 
-    def build_solution(self, solver, var_manager, optimal_lambda,
-                       numerator_value_scaled, denominator_value_scaled,
-                       objective_scale_factor) -> Solution:
+    def build_solution(self, solution_data: dict) -> Solution:
+        """
+        Принимает словарь из RoutingOrchestrator:
+          vehicle_routes:     {v_id: [loc_id, ...]}
+          arrival_times:      {(v_id, loc_id): minutes}
+          deliveries:         {(v_id, loc_id): {brand_id: units}}
+          total_cost:         float
+          total_revenue:      float
+          optimal_lambda:     float
+        """
+        vehicle_routes  = solution_data['vehicle_routes']
+        arrival_times   = solution_data['arrival_times']
+        deliveries      = solution_data['deliveries']
+        total_cost      = solution_data['total_cost']
+        total_revenue   = solution_data['total_revenue']
+        optimal_lambda  = solution_data.get('optimal_lambda', 0.0)
+
+        dist_m = self.scenario.network.distance_matrix
+        time_m = self.scenario.network.time_matrix
+        K      = self.scenario.units_per_crate
 
         vehicle_assignments = []
         for v in self.scenario.vehicles:
-            # Используем safe_value, чтобы не вызвать ошибку если переменной нет
-            is_active = False
-            try:
-                is_active = solver.BooleanValue(var_manager.get_vehicle_used_var(v.id))
-            except:
-                pass
+            route_loc_ids = vehicle_routes.get(v.id, [])
 
-            if is_active:
-                route = self._reconstruct_route(solver, var_manager, v)
-                vehicle_assignments.append(VehicleAssignment(
-                    vehicle=v,
-                    route=route,
-                    total_time=solver.Value(var_manager.get_total_time_var(v.id)),
-                    total_dist=solver.Value(var_manager.get_total_dist_var(v.id)),
-                    is_active=True
-                ))
-            else:
+            if not route_loc_ids:
                 vehicle_assignments.append(VehicleAssignment(vehicle=v, route=[], is_active=False))
+                continue
 
+            steps: List[RouteStep] = []
+            total_dist  = 0.0
+            total_time  = 0
+
+            for i, loc_id in enumerate(route_loc_ids):
+                loc = self.location_by_id[loc_id]
+
+                if i == 0:
+                    dist_from_prev = 0.0
+                    time_from_prev = 0
+                else:
+                    prev_id = route_loc_ids[i - 1]
+                    dist_from_prev = dist_m[prev_id][loc_id]
+                    time_from_prev = int(time_m[prev_id][loc_id])
+                    total_dist += dist_from_prev
+                    total_time += time_from_prev
+                    prev_loc = self.location_by_id[prev_id]
+                    if isinstance(prev_loc, Store):
+                        total_time += int(prev_loc.service_time)
+
+                # Объём доставки в эту точку (суммарно по брендам)
+                store_delivery = deliveries.get((v.id, loc_id), {})
+                del_vol    = sum(store_delivery.values())
+                del_crates = sum(
+                    math.ceil(units / K) for units in store_delivery.values()
+                ) if store_delivery else 0
+
+                service_t = int(getattr(loc, 'service_time', 0))
+
+                steps.append(RouteStep(
+                    location=loc,
+                    distance_from_prev=dist_from_prev,
+                    time_from_prev=time_from_prev,
+                    delivered_volume=del_vol,
+                    service_time=service_t,
+                    delivered_crates=del_crates,
+                ))
+
+            vehicle_assignments.append(VehicleAssignment(
+                vehicle=v,
+                route=steps,
+                total_time=total_time,
+                total_dist=total_dist,
+                is_active=True,
+            ))
+
+        # Склады: активен если хоть одна машина через него прошла
+        active_wh_ids = {
+            loc_id
+            for route in vehicle_routes.values()
+            for loc_id in route
+            if loc_id in {wh.id for wh in self.scenario.warehouses}
+        }
         warehouse_assignments = []
         for wh in self.scenario.warehouses:
-            is_active = solver.BooleanValue(var_manager.get_wh_active_var(wh.id))
-            max_vol = solver.Value(var_manager.get_wh_max_vol_var(wh.id))
+            is_active = wh.id in active_wh_ids
+            # Пиковый объём = суммарная доставка всех машин через этот склад
+            max_vol = 0
+            if is_active:
+                for v in self.scenario.vehicles:
+                    for (v_id, loc_id), brand_dict in deliveries.items():
+                        if v_id == v.id and loc_id == wh.id:
+                            max_vol += sum(math.ceil(u / K) for u in brand_dict.values())
             warehouse_assignments.append(WarehouseAssignment(
                 warehouse=wh, is_active=is_active, max_volume=max_vol
             ))
@@ -45,81 +109,6 @@ class SolutionPresenter:
             vehicle_assignments=vehicle_assignments,
             warehouse_assignments=warehouse_assignments,
             optimal_objective_value=optimal_lambda,
-            total_numerator_cost=numerator_value_scaled / objective_scale_factor,
-            total_denominator_value=denominator_value_scaled / objective_scale_factor
+            total_numerator_cost=total_cost,
+            total_denominator_value=total_revenue,
         )
-
-    def _reconstruct_route(self, solver, var_manager, vehicle: Vehicle) -> List[RouteStep]:
-
-        route_steps = []
-        curr_loc_id = ""
-
-        # 1. Находим склад отправления
-        for wh in self.scenario.warehouses:
-            for j_loc in self.scenario.all_locations:
-                x_var = var_manager.get_routing_var(vehicle.id, wh.id, j_loc.id)
-                if x_var is not None and solver.BooleanValue(x_var):
-                    curr_loc_id = wh.id
-                    break
-            if curr_loc_id != "": break
-
-        if curr_loc_id == "": return []
-
-        visited_ids = set()
-        max_len = len(self.scenario.all_locations) + 1
-
-        # ДОБАВЛЯЕМ СТАРТОВЫЙ СКЛАД (Начало пути)
-        route_steps.append(RouteStep(
-            location=self.location_by_id[curr_loc_id],
-            distance_from_prev=0.0,
-            time_from_prev=0,
-            delivered_volume=0,
-            service_time=0
-        ))
-
-        for _ in range(max_len):
-            visited_ids.add(curr_loc_id)
-
-            next_loc_id = ""
-            for j_loc in self.scenario.all_locations:
-                if j_loc.id == curr_loc_id: continue
-                x_var = var_manager.get_routing_var(vehicle.id, curr_loc_id, j_loc.id)
-                if x_var is not None and solver.BooleanValue(x_var):
-                    next_loc_id = j_loc.id
-                    break
-
-            if next_loc_id == "": break  # Тупик
-
-            # Вытаскиваем данные перехода
-            dist = self.scenario.network.distance_matrix[curr_loc_id][next_loc_id]
-            time_ij = int(self.scenario.network.time_matrix[curr_loc_id][next_loc_id])
-
-            # Вытаскиваем объем доставки в эту точку
-            del_vol = 0
-            del_crates = 0
-            for b in self.scenario.brands:
-                del_var = var_manager.get_delivery_var(vehicle.id, next_loc_id, b.id)
-                crates_var = var_manager.get_delivery_crates_var(vehicle.id, next_loc_id, b.id)
-                if del_var is not None:
-                    del_vol += solver.Value(del_var)
-                if crates_var is not None:
-                    del_crates += solver.Value(crates_var)
-
-            # Вычисляем время обслуживания
-            loc_obj = self.location_by_id[next_loc_id]
-            service_time = getattr(loc_obj, 'service_time', 0) if loc_obj else 0
-            route_steps.append(RouteStep(
-                location=self.location_by_id[next_loc_id],
-                distance_from_prev=dist,
-                time_from_prev=time_ij,
-                delivered_volume=del_vol,
-                service_time=service_time,
-                delivered_crates=del_crates
-            ))
-
-            curr_loc_id = next_loc_id
-
-            if curr_loc_id in [w.id for w in self.scenario.warehouses]:
-                break
-
-        return route_steps

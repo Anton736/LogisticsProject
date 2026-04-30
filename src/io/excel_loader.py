@@ -113,7 +113,7 @@ class LogisticsExcelLoader(BaseDataLoader):
         cap_crates = int(raw_cap_crates) if raw_cap_crates > 0 else 500
 
         raw_count = extractor.get_float_value(self.map.col_veh_count)
-        count = int(raw_count) if raw_count > 0 else 5
+        count = int(raw_count) if raw_count > 0 else 9
 
         print(f"  [Транспорт] Ставка: {dr}₽, Км: {km}₽, Час: {hr}₽.")
         print(f"  [Вместимость] {cap_crates} ящ/машину. Машин: {count}.")

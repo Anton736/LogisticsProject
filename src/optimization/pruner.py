@@ -213,8 +213,13 @@ class RoutePruner:
                     selected.append((t_time, n_id))
 
             cache[i_id] = {x[1] for x in selected}
-
+        all_nodes = list(cache.keys())
+        for i_id in all_nodes:
+            for j_id in list(cache[i_id]):  # Смотрим всех соседей точки А
+                if j_id in cache:
+                    cache[j_id].add(i_id)  # Добавляем А в список соседей точки Б
         return cache
+
 
     # -----------------------------------------------------------------------
     # Вспомогательные

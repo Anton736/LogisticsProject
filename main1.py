@@ -3,90 +3,144 @@ from src.io.excel_mapping import ExcelMapping
 from src.io.excel_loader import LogisticsExcelLoader
 from src.io.excel_matrix_loader import ExcelMatrixLoader
 from src.models.demand import DemandManager, DemandStep
+from src.optimization.fleet_optimizer import FleetOptimizer
 from src.optimization.pruner import RoutePruner
-from src.optimization.dinkelbach_orchestrator import DinkelbachOrchestrator
 from src.core.enums import WarehouseCostMode
 from src.io.excel_exporter import LogisticsExcelExporter
+from src.optimization.routing_orchestrator import RoutingOrchestrator
+from src.optimization.time_revenue_manager import LinearTimeRevenueManager
 
 
 def main():
     try:
-        scenario_file = os.path.join("data", "для логистики.xlsm")
+        # 1. Пути к файлам
+        scenario_file   = os.path.join("data", "для логистики.xlsm")
+        distances_file  = os.path.join("data", "matrix_distance_km.xlsx")
+        times_file      = os.path.join("data", "matrix_time_minutes.xlsx")
+
+        # 2. Загрузчик матриц
         matrix_loader = ExcelMatrixLoader(
-            distance_file=os.path.join("data", "matrix_distance_km.xlsx"),
-            time_file=os.path.join("data", "matrix_time_minutes.xlsx")
+            distance_file=distances_file,
+            time_file=times_file,
+            distance_sheet=0,
+            time_sheet=0,
         )
 
-        loader = LogisticsExcelLoader(scenario_file, ExcelMapping(), matrix_loader=matrix_loader)
-        scenario = loader.load_scenario()
+        # 3. Загрузка сценария
+        mapping = ExcelMapping()
+        loader = LogisticsExcelLoader(scenario_file, mapping, matrix_loader=matrix_loader)
 
-        # 1. ПРУНЕР: Оптимальный баланс сложности
-        pruner = RoutePruner(scenario, min_k_neighbors=25, max_k_neighbors=35)
-        demand_manager = DemandManager([DemandStep(time_limit=1440, multiplier_x100=100)])
         print("Шаг 1: Загрузка сценария из Excel...")
         scenario = loader.load_scenario()
 
-        # --- БЛОК АУДИТА КОСТОВ ---
-        print("\n--- АУДИТ СТАВОК И КОСТОВ ---")
-        if scenario.vehicles:
-            v = scenario.vehicles[0]
-            print(f"Ставка за выезд (Call): {v.cost_call} руб.")
-            print(f"Ставка за км: {v.cost_km} руб.")
-            print(f"Ставка за час: {v.cost_hour} руб.")
-            print(f"Пример стоимости машины за 24 часа работы: {v.cost_call + (v.cost_hour * 24)} руб. + км")
+        # =========================================================
+        # НОВЫЙ БЛОК: ПРОВЕРКА ЗАГРУЖЕННЫХ ДАННЫХ
+        # =========================================================
+        print("\n--- Отчет о загрузке данных ---")
+        print(f"Магазинов (Stores): {len(scenario.stores)}")
+        print(f"Складов (Warehouses): {len(scenario.warehouses)}")
+        print(f"Машин (Vehicles): {len(scenario.vehicles)}")
+        total_demand_units = sum(store.demands["B1"][1440] for store in scenario.stores)
+        total_capacity_crates = sum(v.capacity for v in scenario.vehicles)
+        total_capacity_units = total_capacity_crates * scenario.units_per_crate
 
-        for wh in scenario.warehouses:
-            print(f"Склад/Завод: {wh.name}, Завод: {wh.is_factory}, Фикс. кост: {wh.fixed_staff_cost}")
-        print(f"Цена за единицу продукции (для выручки): {scenario.bread_unit_cost} руб.")
-        print("-----------------------------\n")
-        print(f"Пример дистанции (0 -> 877): {scenario.network.distance_matrix['0']['877']}")
-        # 2. ОРКЕСТРАТОР: Запускаем Динкельбаха
-        # Используем масштаб 100 (для учета копеек)
-        orchestrator = DinkelbachOrchestrator(
-            scenario=scenario,
-            pruner=pruner,
-            demand_manager=demand_manager,
-            warehouse_cost_mode=WarehouseCostMode.PEAK_INPUT,
-            objective_scale_factor=1
-        )
-        # --- ДИАГНОСТИКА ГРУЗА ---
-        total_demand_units = sum(s.demands["B1"][1440] for s in scenario.stores)
+        print(f"Общий заказ: {total_demand_units} ЕДИНИЦ продукции.")
+        print(f"Вместимость: {total_capacity_crates} ЯЩИКОВ (или {total_capacity_units} единиц).")
+        print("-------------------------------\n")
+
+        if len(scenario.stores) == 0:
+            print("[СТОП] Загружено 0 магазинов. Оптимизация невозможна.")
+            print("Возможные причины:")
+            print(" 1. В Excel столбец называется не '№' (возможно есть невидимый пробел).")
+            print(" 2. В столбце '№' нет чисел (только текст), фильтр их удалил.")
+            return
+
+        if len(scenario.vehicles) == 0:
+            print("[СТОП] Загружено 0 машин. Оптимизация невозможна.")
+            print("Причина: Не найдены данные о машинах в справочнике.")
+            return
+
+        # --- ДИАГНОСТИКА ФЛОТА ---
         units_per_crate = scenario.units_per_crate
         total_demand_crates = sum(
             (s.demands["B1"][1440] + units_per_crate - 1) // units_per_crate for s in scenario.stores)
         total_fleet_capacity_crates = sum(v.capacity for v in scenario.vehicles)
-
-        print("\n=== ДИАГНОСТИКА ГРУЗА ===")
-        print(f"Общий спрос в штуках: {total_demand_units}")
-        print(f"Коэффициент штук в ящике: {units_per_crate}")
-        print(f"Общий спрос в ЯЩИКАХ: {total_demand_crates}")
-        print(f"Общая вместимость флота (ЯЩИКИ): {total_fleet_capacity_crates}")
-
-        if total_demand_crates > total_fleet_capacity_crates:
-            print("[КРИТИЧЕСКАЯ ОШИБКА]: Твой товар не влезет в машины! Нужно больше машин или меньше товара.")
-
-        # Проверка самого крупного магазина
         max_store = max(scenario.stores, key=lambda s: s.demands["B1"][1440])
         max_store_crates = (max_store.demands["B1"][1440] + units_per_crate - 1) // units_per_crate
         max_veh_cap = max(v.capacity for v in scenario.vehicles)
 
-        print(f"Самый большой заказ: {max_store.name} ({max_store_crates} ящ.)")
-        print(f"Самая большая машина: {max_veh_cap} ящиков")
-
+        print(f"Общий спрос в ящиках: {total_demand_crates}, вместимость флота: {total_fleet_capacity_crates} ящ.")
+        if total_demand_crates > total_fleet_capacity_crates:
+            print("[КРИТИЧЕСКАЯ ОШИБКА]: Товар не влезет в машины! Нужно больше машин или меньше товара.")
+            return
         if max_store_crates > max_veh_cap:
-            print(f"[КРИТИЧЕСКАЯ ОШИБКА]: Магазин {max_store.name} просит больше, чем влезет в ЛЮБУЮ твою машину!")
-        print("==========================\n")
-        print("\n=== ЗАПУСК ОПТИМИЗАЦИИ ДИНКЕЛЬБАХА (ЦЕНА / ЦЕННОСТЬ) ===")
-        solution = orchestrator.solve(epsilon=0.001, max_iterations=5)
+            print(f"[КРИТИЧЕСКАЯ ОШИБКА]: Магазин {max_store.name} ({max_store_crates} ящ.) превышает вместимость любой машины ({max_veh_cap} ящ.).")
+            return
+        # =========================================================
 
+        # 4. Вспомогательные компоненты
+        demand_manager = DemandManager([DemandStep(time_limit=1440, multiplier_x100=100)])
+        pruner = RoutePruner(scenario, min_k_neighbors=60, max_k_neighbors=75)
+        time_manager = LinearTimeRevenueManager(drop_to_percent=0.0)
+        # 5. Оптимизация
+        # 5. Оптимизация
+        print("Шаг 2: Разведочный запуск для определения базы (ищем 60-120 секунд)...")
+
+        # 5.1 Разведочный запуск (нужно чтобы в Orchestrator был добавлен параметр time_limit_seconds)
+        scout_orchestrator = RoutingOrchestrator(
+            scenario=scenario,
+            pruner=pruner,
+            demand_manager=demand_manager,
+            warehouse_cost_mode=WarehouseCostMode.PEAK_INPUT,
+            time_manager=time_manager,
+            time_limit_per_run=60  #<-- Раскомментируйте, когда добавите этот параметр в Orchestrator
+        )
+
+        # Ставим max_iterations=2 или 3, чтобы Динкельбах быстро завершился
+        scout_solution = scout_orchestrator.solve(max_iterations=2)
+
+        # 5.2 Определяем базу
+        # 5.2 Определяем базу
+        if scout_solution and scout_solution.vehicle_assignments:
+            # Считаем только те машины, которые реально поехали (is_active)
+            active_vehicles = [va for va in scout_solution.vehicle_assignments if va.is_active]
+            base_vehicles = len(active_vehicles)
+
+            if base_vehicles == 0:
+                base_vehicles = len(scenario.vehicles)  # На всякий случай
+            print(f"Разведочный запуск решил использовать {base_vehicles} машин.")
+        else:
+            print("Разведочный запуск не нашел быстрого решения. Берем все машины.")
+            base_vehicles = len(scenario.vehicles) - 2  # Фолбэк
+
+        # 5.3 Формируем окно +-2 машины
+        min_v = max(1, base_vehicles - 2)
+        max_v = min(len(scenario.vehicles), base_vehicles + 2)
+
+        print(f"Шаг 3: Запускаем точный поиск в окне от {min_v} до {max_v} машин...")
+
+        # 5.4 Финальный перебор флота
+        optimizer = FleetOptimizer(
+            scenario=scenario,
+            pruner=pruner,
+            demand_manager=demand_manager,
+            warehouse_cost_mode=WarehouseCostMode.PEAK_INPUT,
+            time_manager=time_manager,
+            min_vehicles=min_v,
+            max_vehicles=max_v,
+            time_limit_per_run=60,  # 60 секунд на каждый вариант
+        )
+
+        solution = optimizer.optimize()
+
+        # 6. Результаты
         if solution:
             print("--- Оптимизация завершена успешно ---")
             solution.print_summary()
             exporter = LogisticsExcelExporter()
-            exporter.export(solution, output_path="data/маршруты_финал.xlsx")
-            print("\nРезультат сохранен в data/маршруты_финал.xlsx")
+            exporter.export(solution, output_path="data/маршруты_результат.xlsx")
         else:
-            print("Решение не найдено. Попробуй еще раз уменьшить количество соседей в RoutePruner.")
+            print("Решение не найдено. Проверьте ограничения сценария.")
 
     except Exception as e:
         print(f"\n[КРИТИЧЕСКАЯ ОШИБКА]: {e}")

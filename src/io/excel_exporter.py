@@ -7,7 +7,9 @@ class LogisticsExcelExporter:
     @staticmethod
     def _format_time(minutes: int) -> str:
         """Переводит минуты в формат ЧЧ:ММ"""
-        if minutes == 0 or minutes == 1440:
+        if minutes == 0:
+            return "00:00"
+        elif minutes == 1440:
             return "24:00"
         h = minutes // 60
         m = minutes % 60
@@ -21,9 +23,17 @@ class LogisticsExcelExporter:
                 continue
 
             vehicle_id = assignment.vehicle.id
-
+            current_time_minutes = 0
             for step in assignment.route:
                 loc = step.location
+                current_time_minutes += step.time_from_prev
+                if isinstance(loc, Store) and current_time_minutes < loc.time_start:
+                    current_time_minutes = max(loc.time_start, current_time_minutes)
+                # Фиксируем время прибытия
+                arrival_time_str = self._format_time(current_time_minutes)
+
+                # 2. Затем прибавляем время на обслуживание (разгрузку), чтобы след. точка посчиталась правильно
+                current_time_minutes += step.service_time
 
                 # Если это склад, пропускаем или пишем нули. Нам интересны магазины.
                 # Но чтобы было видно откуда выехала машина, оставим в таблице.
@@ -41,7 +51,7 @@ class LogisticsExcelExporter:
 
                 rows.append({
                     "Код": loc.id,
-                    "текущий маршрут": vehicle_id,
+                    "текущий_маршрут": vehicle_id,
                     "расстояние": round(step.distance_from_prev, 2),
                     "время": step.time_from_prev,
                     "кол-во ед. продукции": step.delivered_volume,
@@ -49,7 +59,9 @@ class LogisticsExcelExporter:
                      "кол-во ящиков текущее": step.delivered_crates,
                     "кол-во продукции план": plan_qty,
                     "окно доставки с": time_from,
-                    "окно доставки по": time_to
+                    "окно доставки по": time_to,
+                    "время прибытия": arrival_time_str,  # [ИЗМЕНЕНИЕ 2] 11-я колонка
+                    "адрес": getattr(loc, 'address', loc.name)
                 })
 
         df = pd.DataFrame(rows)
