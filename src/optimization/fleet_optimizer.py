@@ -12,7 +12,8 @@ from src.models.solution import Solution
 class FleetOptimizer:
     """
     Перебирает заданный диапазон размеров флота, запускает RoutingOrchestrator
-    для каждого N и возвращает решение с максимальной чистой прибылью.
+    для каждого N и возвращает решение.
+    Приоритет: 1) Максимальное число посещенных магазинов. 2) Максимальная прибыль.
     """
 
     def __init__(self,
@@ -41,10 +42,14 @@ class FleetOptimizer:
 
     def optimize(self) -> Optional[Solution]:
         best_solution: Optional[Solution] = None
+
+        # НОВЫЕ ПЕРЕМЕННЫЕ ДЛЯ ПРАВИЛЬНОГО ВЫБОРА
+        best_visited_count = -1
         best_profit = float('-inf')
 
         total = self.max_vehicles - self.min_vehicles + 1
-        print(f"\n=== FleetOptimizer: перебор от {self.min_vehicles} до {self.max_vehicles} машин ({total} прогонов) ===")
+        print(
+            f"\n=== FleetOptimizer: перебор от {self.min_vehicles} до {self.max_vehicles} машин ({total} прогонов) ===")
 
         for n in range(self.min_vehicles, self.max_vehicles + 1):
             print(f"\n>>> Прогон N={n} машин")
@@ -67,15 +72,29 @@ class FleetOptimizer:
                 continue
 
             profit = solution.total_denominator_value - solution.total_numerator_cost
-            print(f"  N={n}: прибыль={profit:.2f} (выручка={solution.total_denominator_value:.2f}, затраты={solution.total_numerator_cost:.2f})")
 
-            if profit > best_profit:
+            # Считаем количество посещенных магазинов в этом решении
+            # У каждой машины в route лежит [Склад, Магазин, Магазин...]. Вычитаем склад.
+            visited_count = sum(max(0, len(va.route) - 1) for va in solution.vehicle_assignments if va.route)
+
+            print(
+                f"  N={n}: Точек={visited_count}, Прибыль={profit:.2f} (выручка={solution.total_denominator_value:.2f}, затраты={solution.total_numerator_cost:.2f})")
+
+            # --- ЛОГИКА ВЫБОРА, СОГЛАСОВАННАЯ С ОРКЕСТРАТОРОМ ---
+            is_better = False
+            if visited_count > best_visited_count:
+                is_better = True  # Развезли хлеб большему числу людей!
+            elif visited_count == best_visited_count and profit > best_profit:
+                is_better = True  # Развезли стольким же, но заработали больше!
+
+            if is_better:
+                best_visited_count = visited_count
                 best_profit = profit
                 best_solution = solution
-                print(f"  >>> Новый лучший результат при N={n}")
+                print(f"  >>> Новый лучший результат при N={n} (Точек: {visited_count}, Прибыль: {profit:.2f})")
 
         if best_solution:
-            print(f"\n=== Лучший флот: прибыль={best_profit:.2f} ===")
+            print(f"\n=== Лучший флот: Точек={best_visited_count}, Прибыль={best_profit:.2f} ===")
         else:
             print("\n=== FleetOptimizer: ни одного решения не найдено ===")
 

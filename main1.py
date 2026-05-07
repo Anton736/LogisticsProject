@@ -80,7 +80,7 @@ def main():
 
         # 4. Вспомогательные компоненты
         demand_manager = DemandManager([DemandStep(time_limit=1440, multiplier_x100=100)])
-        pruner = RoutePruner(scenario, min_k_neighbors=60, max_k_neighbors=75)
+        pruner = RoutePruner(scenario, min_k_neighbors=80, max_k_neighbors=105)
         time_manager = LinearTimeRevenueManager(drop_to_percent=0.0)
         # 5. Оптимизация
         # 5. Оптимизация
@@ -97,7 +97,7 @@ def main():
         )
 
         # Ставим max_iterations=2 или 3, чтобы Динкельбах быстро завершился
-        scout_solution = scout_orchestrator.solve(max_iterations=2)
+        scout_solution = scout_orchestrator.solve(max_iterations=10)
 
         # 5.2 Определяем базу
         # 5.2 Определяем базу
@@ -115,7 +115,7 @@ def main():
 
         # 5.3 Формируем окно +-2 машины
         min_v = max(1, base_vehicles - 2)
-        max_v = min(len(scenario.vehicles), base_vehicles + 2)
+        max_v = min(len(scenario.vehicles), base_vehicles + 1)
 
         print(f"Шаг 3: Запускаем точный поиск в окне от {min_v} до {max_v} машин...")
 

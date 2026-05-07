@@ -25,7 +25,7 @@ class RoutingOrchestrator:
                  demand_manager: DemandManager,
                  warehouse_cost_mode: WarehouseCostMode = WarehouseCostMode.PEAK_INPUT,
                  objective_scale_factor: int = 100,
-                 time_limit_per_run: int = 7200,
+                 time_limit_per_run: int = 60*120,
                  time_manager: Optional[BaseTimeRevenueManager] = None):
 
 
@@ -84,6 +84,10 @@ class RoutingOrchestrator:
         best_lambda = 1.0
         best_data: Optional[Dict] = None
 
+        # НОВЫЕ ПЕРЕМЕННЫЕ ДЛЯ ПРАВИЛЬНОЙ ЛОГИКИ ВЫБОРА
+        best_visited_count = -1
+        best_lambda_for_max_visits = float('inf')
+
         print(f"Starting Routing+Dinkelbach: epsilon={epsilon}, max_iter={max_iterations}")
 
         for iteration in range(max_iterations):
@@ -92,8 +96,6 @@ class RoutingOrchestrator:
             data = self._solve_routing(best_lambda)
             if data is None:
                 print("No solution found.")
-                if best_data is None:
-                    return None
                 break
 
             cost = data['total_cost']
@@ -101,22 +103,69 @@ class RoutingOrchestrator:
 
             if revenue == 0:
                 print("Zero revenue, stopping.")
-                if best_data is None:
-                    return None
                 break
 
             new_lambda = cost / revenue
-            print(f"Cost={cost:.2f}, Revenue={revenue:.2f}, new_lambda={new_lambda:.8f}")
 
-            data['optimal_lambda'] = new_lambda
-            best_data = data
+            # --- СЧИТАЕМ РЕАЛЬНУЮ ПОСЕЩАЕМОСТЬ В ЭТОМ ВАРИАНТЕ ---
+            # route содержит [depot_id, store_id, store_id...]
+            # Вычитаем 1 (склад), чтобы получить количество реальных магазинов
+            visited_count = sum(max(0, len(route) - 1) for route in data['vehicle_routes'].values())
+
+            print(f"Cost={cost:.2f}, Rev={revenue:.2f}, Visited={visited_count}, new_lambda={new_lambda:.8f}")
+
+            # --- ЛОГИКА ВЫБОРА (Приоритет 1: Точки. Приоритет 2: Лямбда) ---
+            is_better = False
+            if visited_count > best_visited_count:
+                is_better = True  # Нашли маршрут, который охватывает БОЛЬШЕ магазинов
+            elif visited_count == best_visited_count and new_lambda < best_lambda_for_max_visits:
+                is_better = True  # Охватывает столько же, но рентабельность (Лямбда) ЛУЧШЕ
+
+            if is_better:
+                best_visited_count = visited_count
+                best_lambda_for_max_visits = new_lambda
+                data['optimal_lambda'] = new_lambda
+                best_data = data
+                print(f">>> New best layout saved! Visited: {visited_count}, Lambda: {new_lambda:.8f}")
+
+            # Сглаживаем спрос для следующей итерации
+            current_alpha = max(0.1, 0.6 - (iteration * (0.5 / max_iterations)))
+
+            self._update_demand_crates_from_arrivals(data['arrival_times'], alpha=current_alpha)
 
             if abs(new_lambda - best_lambda) < epsilon:
                 print(f"Converged! lambda={new_lambda:.8f}")
                 break
 
             best_lambda = new_lambda
+        if best_data and 'manager_routes' in best_data:
+            print("\n🌟 ЗАПУСК ФИНАЛЬНОЙ ПОЛИРОВКИ ЛУЧШЕГО РЕШЕНИЯ 🌟")
 
+            # Замораживаем спрос (alpha=1.0) ровно под лучшее решение
+            self._update_demand_crates_from_arrivals(best_data['arrival_times'], alpha=1.0)
+
+            # Даем увеличенное время (например, х3 от обычного)
+            polish_time = self.time_limit_per_run * 3
+
+            # Запускаем докрутку
+            polished_data = self._solve_routing(
+                lambda_val=best_data['optimal_lambda'],
+                initial_routes=best_data['manager_routes'],
+                custom_time=polish_time
+            )
+
+            if polished_data:
+                pol_visited = sum(max(0, len(r) - 1) for r in polished_data['vehicle_routes'].values())
+                rev = polished_data['total_revenue']
+                pol_lambda = polished_data['total_cost'] / rev if rev > 0 else float('inf')
+
+                print(f"Полировка: Точек={pol_visited}, Лямбда={pol_lambda:.8f}")
+
+                # Если точки не потерялись, а экономика улучшилась — забираем результат!
+                if pol_visited >= best_visited_count and pol_lambda < best_lambda_for_max_visits:
+                    print("✅ Полировка успешно улучшила маршрут!")
+                    polished_data['optimal_lambda'] = pol_lambda
+                    best_data = polished_data
         if best_data:
             return self._build_solution(best_data)
         return None
@@ -125,7 +174,8 @@ class RoutingOrchestrator:
     # Одна итерация Динкельбаха через RoutingModel
     # ------------------------------------------------------------------
 
-    def _solve_routing(self, lambda_val: float) -> Optional[Dict]:
+    def _solve_routing(self, lambda_val: float, initial_routes: Optional[List[List[int]]] = None, custom_time: Optional[int] = None) -> Optional[Dict]:
+
         manager = pywrapcp.RoutingIndexManager(
             self.num_nodes,
             self.num_vehicles,
@@ -241,10 +291,20 @@ class RoutingOrchestrator:
         params.local_search_metaheuristic = (
             routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
         )
-        params.time_limit.seconds = self.time_limit_per_run
+        time_limit = custom_time if custom_time is not None else self.time_limit_per_run
+        params.time_limit.seconds = time_limit
         params.log_search = True
 
-        solution = routing.SolveWithParameters(params)
+        if initial_routes is not None:
+            # Читаем маршрут и делаем Теплый Старт
+            initial_assignment = routing.ReadAssignmentFromRoutes(initial_routes, True)
+            if initial_assignment:
+                solution = routing.SolveFromAssignmentWithParameters(initial_assignment, params)
+            else:
+                solution = routing.SolveWithParameters(params)
+        else:
+            # Обычный холодный старт
+            solution = routing.SolveWithParameters(params)
         if solution is None:
             return None
 
@@ -264,12 +324,14 @@ class RoutingOrchestrator:
         deliveries: Dict[tuple, Dict[str, int]] = {}  # (v_id, loc_id) -> {brand_id: units}
         total_cost = 0.0
         total_revenue = 0.0
-
+        manager_routes: List[List[int]] = []
         for v_idx, v in enumerate(self.scenario.vehicles):
             if not routing.IsVehicleUsed(solution, v_idx):
+                manager_routes.append([])
                 continue
 
             route: List[str] = []
+            v_manager_route: List[int] = []
             route_dist = 0.0
             t = 0
             prev_loc = None
@@ -279,7 +341,8 @@ class RoutingOrchestrator:
                 node = manager.IndexToNode(index)
                 loc = self.all_locs[node]
                 route.append(loc.id)
-
+                if not routing.IsStart(index):
+                    v_manager_route.append(node)
                 if prev_loc is not None:
                     travel = int(time_m[prev_loc.id][loc.id])
                     service = int(prev_loc.service_time) if isinstance(prev_loc, Store) else 0
@@ -289,19 +352,21 @@ class RoutingOrchestrator:
                 arrival_times[(v.id, loc.id)] = t
 
                 # Доставка = полный спрос (магазин посещён → везём всё)
+                # Доставка = считаем реальный спрос по времени t (для выгрузки)
                 if isinstance(loc, Store):
                     store_delivery = {}
                     for b in self.scenario.brands:
-                        units = next(iter(loc.demands.get(b.id, {}).values()), 0)
+                        # Считаем точные штуки на минуту t
+                        units = self._get_units_at_time(loc, t, b.id)
                         store_delivery[b.id] = units
+
                     deliveries[(v.id, loc.id)] = store_delivery
                     total_revenue += self.time_manager.compute_revenue(loc, t, self.node_revenue[loc.id])
-
                 prev_loc = loc
                 index = solution.Value(routing.NextVar(index))
 
             vehicle_routes[v.id] = route
-
+            manager_routes.append(v_manager_route)
             # Время смены: от старта склада до финальной точки + её обслуживание
             if prev_loc is not None:
                 service_last = int(prev_loc.service_time) if isinstance(prev_loc, Store) else 0
@@ -317,6 +382,7 @@ class RoutingOrchestrator:
             'deliveries': deliveries,
             'total_cost': total_cost,
             'total_revenue': total_revenue,
+            'manager_routes': manager_routes,
         }
 
     # ------------------------------------------------------------------
@@ -341,4 +407,46 @@ class RoutingOrchestrator:
             'scenario':          self.scenario,
         })
 
+    def _get_units_at_time(self, store: Store, arrival_minute: int, brand_id: str) -> int:
+        """Вычисляет реальное количество товара (в штуках) на момент приезда машины."""
+        max_units = next(iter(store.demands.get(brand_id, {}).values()), 0)
+        if max_units <= 0:
+            return 0
+        multiplier = self.time_manager.compute_revenue(store, arrival_minute, 1.0)
+        return int(round(max_units * multiplier))
+
+    def _update_demand_crates_from_arrivals(self, arrival_times: Dict[tuple, int], alpha: float = 0.5):
+        """
+        Умный пересчет спроса со сглаживанием.
+        alpha (0.5) - коэффициент подвижности. Защищает алгоритм от бесконечных "качелей".
+        """
+        K = self.scenario.units_per_crate
+
+        for loc in self.all_locs:
+            if isinstance(loc, Store):
+                # Ищем, когда машина приехала в этот магазин на прошлой итерации
+                t = None
+                for (v_id, loc_id), arr_time in arrival_times.items():
+                    if loc_id == loc.id:
+                        t = arr_time
+                        break
+
+                if t is not None:
+                    # Магазин посещен: считаем, сколько ящиков РЕАЛЬНО нужно было отгрузить
+                    real_units = sum(self._get_units_at_time(loc, t, b.id) for b in self.scenario.brands)
+                    target_crates = real_units / K
+                else:
+                    # Магазин был пропущен: возвращаем ему изначальный (максимальный) вес,
+                    # чтобы солвер не думал, что непосещенные точки "бесплатные" по весу
+                    max_units = sum(next(iter(loc.demands.get(b.id, {}).values()), 0) for b in self.scenario.brands)
+                    target_crates = max_units / K
+
+                # Текущее значение, которое использовал солвер
+                current_crates = self.node_demand_crates[loc.id]
+
+                # ЭКСПОНЕНЦИАЛЬНОЕ СГЛАЖИВАНИЕ: сдвигаем спрос в сторону реальности, но плавно
+                smoothed_crates = current_crates + alpha * (target_crates - current_crates)
+
+                # Обновляем словарь. На следующей итерации солвер увидит освободившееся место!
+                self.node_demand_crates[loc.id] = math.ceil(smoothed_crates)
 # END OF FILE routing_orchestrator.py
