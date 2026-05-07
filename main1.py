@@ -9,9 +9,9 @@ from src.core.enums import WarehouseCostMode
 from src.io.excel_exporter import LogisticsExcelExporter
 from src.optimization.routing_orchestrator import RoutingOrchestrator
 from src.optimization.time_revenue_manager import LinearTimeRevenueManager
+from map_osrm import build_route_map
 
-
-def main():
+def main(path):
     try:
         # 1. Пути к файлам
         scenario_file   = os.path.join("data", "для логистики.xlsm")
@@ -138,7 +138,7 @@ def main():
             print("--- Оптимизация завершена успешно ---")
             solution.print_summary()
             exporter = LogisticsExcelExporter()
-            exporter.export(solution, output_path="data/маршруты_результат.xlsx")
+            exporter.export(solution, output_path=path)
         else:
             print("Решение не найдено. Проверьте ограничения сценария.")
 
@@ -147,4 +147,6 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    str = "data/маршруты_результат.xlsx"
+    main(str)
+    build_route_map(routes_excel_path=str)
